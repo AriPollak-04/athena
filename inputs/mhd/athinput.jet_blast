@@ -86,6 +86,9 @@ x3_0 = 0.0
 
 #For physical blast
 E_jet = 0.3
+jet_mode = source
+theta_j  = 0.3             # half-opening angle (optional convenience)
+phi0     = 0.0
 
 
 # FOR TRACKING SHOCK BREAKOUT

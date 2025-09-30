@@ -91,6 +91,10 @@ static Real jet_mu     = 1.0;     // mean molecular weight (dimensionless, ~1 fo
 static Real jet_fth    = 0.01;    // fractional thermal content (0=cold; small numbers recommended)
 static Real jet_L      = 0.0;     // computed luminosity = E_tot / t_stop (if enabled)
 static Real gate_omega = -1.0;    // solid angle of the gate (3D only); -1 means compute on init
+// driving mode: 0 = overwrite primitives in nozzle; 1 = conservative source (add ΔU)
+static int  jet_mode = 0;
+// optional convenience input: half-opening angle; if >=0 it sets dir_angle_min/max automatically
+static Real theta_j = -1.0;
 // ----------------------------------------------------------
 
 int RefinementCondition(MeshBlock *pmb);
@@ -128,6 +132,23 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   jet_fth   = pin->GetOrAddReal("problem", "jet_fth", 0.01);      // small thermal fraction (0..0.5 typical)
   jet_L     = (jet_t_stop > 0.0 ? jet_E_tot / jet_t_stop : 0.0);    // constant over the driving window
 
+  // Mode & convenience angle input
+  std::string jet_mode_s = pin->GetOrAddString("problem", "jet_mode", "overwrite");
+  if (jet_mode_s == "source" || jet_mode_s == "conservative") jet_mode = 1; else jet_mode = 0;
+  theta_j = pin->GetOrAddReal("problem", "theta_j", -1.0);
+  if (theta_j >= 0.0) {
+    bool is2d = (nblocal>0 ? (my_blocks(0)->ks == my_blocks(0)->ke) : true);
+    if (is2d) { gate_dir_min = -theta_j; gate_dir_max = +theta_j; }
+    else      { gate_dir_min = 0.0;      gate_dir_max =  theta_j; }
+    // recompute Ω if 3D
+    if (!is2d) {
+      Real th_min = std::max((Real)0.0, gate_dir_min);
+      Real th_max = std::min((Real)M_PI, gate_dir_max);
+      th_min = std::min(th_min, th_max);
+      gate_omega = 2.0 * M_PI * (std::cos(th_min) - std::cos(th_max));
+    }
+  }
+
   // For 3D runs, precompute the gate solid angle Ω; for 2D we will treat normalization per-unit-length
   if (nblocal > 0) {
     MeshBlock *pmb0 = my_blocks(0);
@@ -146,10 +167,11 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   if (Globals::my_rank == 0) {
     std::fprintf(stderr,
-      "[jet:init] enabled=%d  t_stop=%g  rinj=%g  Gam=%g  (rho=%g p=%g)  E_jet=%g  L=%g  mu=%g  fth=%g  Omega=%g\n",
-      (int)jet_enabled, (double)jet_t_stop, (double)jet_rinj, (double)jet_Gam,
+      "[jet:init] mode=%s enabled=%d  t_stop=%g  rinj=%g  Gam=%g  (rho=%g p=%g)  E_jet=%g  L=%g  mu=%g  fth=%g  Omega=%g  theta_j=%g  gate=[%g,%g] phi0=%g bipolar=%d\n",
+      (jet_mode==1?"source":"overwrite"), (int)jet_enabled, (double)jet_t_stop, (double)jet_rinj, (double)jet_Gam,
       (double)jet_rho, (double)jet_p, (double)jet_E_tot, (double)jet_L,
-      (double)jet_mu, (double)jet_fth, (double)gate_omega);
+      (double)jet_mu, (double)jet_fth, (double)gate_omega, (double)theta_j,
+      (double)gate_dir_min, (double)gate_dir_max, (double)gate_phi0, (int)gate_cone_bipolar);
   }
   breakout_params_inited = true;
   return;
@@ -599,6 +621,46 @@ void Mesh::UserWorkInLoop() {
         p_from_power = std::max((Real)1e-30, eps * (gamma - 1.0) * rho_from_power);
       }
 
+      // Pre-pass: total injection volume for conservative source mode
+      Real V_tot = 0.0;
+      if (jet_mode == 1) {
+        for (int k=pmb->ks; k<=pmb->ke; ++k) {
+          for (int j=pmb->js; j<=pmb->je; ++j) {
+            for (int i=pmb->is; i<=pmb->ie; ++i) {
+              Real x,y,z; cell_to_cart(pmb, k, j, i, x, y, z);
+              Real dx = x - breakout_x1_0, dy = y - breakout_x2_0, dz = z - breakout_x3_0;
+              Real rad = std::sqrt(dx*dx + dy*dy + dz*dz);
+              if (rad > jet_rinj) continue;
+              // Minimal angle gate (same as main logic)
+              bool is2d = (pmb->ks == pmb->ke);
+              bool angle_ok = true;
+              Real theta_dir, phi_dir;
+              if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+                Real zloc = pmb->pcoord->x3v(k) - breakout_x3_0;
+                if (rad > 0.0) { Real ct = zloc / rad; ct = std::max(-1.0, std::min(1.0, ct)); theta_dir = std::acos(ct); } else { theta_dir = 0.0; }
+                Real xloc = pmb->pcoord->x1v(i) - breakout_x1_0;
+                Real yloc = pmb->pcoord->x2v(j) - breakout_x2_0;
+                phi_dir = std::atan2(yloc, xloc); if (phi_dir < 0.0) phi_dir += 2.0*M_PI;
+              } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+                Real zloc = pmb->pcoord->x3v(k) - breakout_x3_0;
+                Real rloc = pmb->pcoord->x1v(i);
+                theta_dir = (rloc > 0.0 ? std::atan2(std::abs(zloc), rloc) : 0.0);
+                phi_dir   = pmb->pcoord->x2v(j) - breakout_x2_0; phi_dir = std::fmod(phi_dir + 2.0*M_PI, 2.0*M_PI);
+              } else { theta_dir = pmb->pcoord->x2v(j) - breakout_x2_0; phi_dir = pmb->pcoord->x3v(k) - breakout_x3_0; phi_dir = std::fmod(phi_dir + 2.0*M_PI, 2.0*M_PI); }
+              if (is2d && std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+                auto wrap_pm_pi = [](Real a)->Real { a = std::fmod(a + M_PI, 2.0*M_PI); if (a < 0.0) a += 2.0*M_PI; return a - M_PI; };
+                Real dphi = wrap_pm_pi(phi_dir - gate_phi0);
+                angle_ok = (dphi >= gate_dir_min && dphi <= gate_dir_max);
+                if (gate_cone_bipolar && !angle_ok) { Real dphi2 = wrap_pm_pi(phi_dir - (gate_phi0 + M_PI)); angle_ok = (dphi2 >= gate_dir_min && dphi2 <= gate_dir_max); }
+              } else { angle_ok = (theta_dir >= gate_dir_min && theta_dir <= gate_dir_max); }
+              if (!angle_ok) continue;
+              V_tot += pmb->pcoord->GetCellVolume(k,j,i);
+            }
+          }
+        }
+        if (V_tot <= 0.0) V_tot = 1e-30;
+      }
+
       long long inj_cells = 0;    // number of cells injected this step
       double    vmag_acc  = 0.0;  // accumulate |v|
       double    vmag_max  = 0.0;  // track max |v|
@@ -670,43 +732,56 @@ void Mesh::UserWorkInLoop() {
             if (vmag > vmag_max) vmag_max = vmag;
             ++inj_cells;
 
-            // Set (rho, p) using energy normalization if active, otherwise fallback
-            Real rho, pgas;
-            if (use_energy_norm) {
-              rho  = rho_from_power;
-              pgas = p_from_power;
-            } else {
-              rho  = std::max(jet_rho, (Real)1e-30);
-              pgas = std::max(jet_p,  (Real)1e-30);
-            }
-            w(IDN,k,j,i) = rho;
-            w(IPR,k,j,i) = pgas;
-            w(IVX,k,j,i) = vx;
-            w(IVY,k,j,i) = vy;
-            w(IVZ,k,j,i) = vz;
+            if (jet_mode == 0) {
+              // --- OVERWRITE MODE (existing behavior) ---
+              Real rho, pgas;
+              if (use_energy_norm) { rho = rho_from_power; pgas = p_from_power; }
+              else { rho = std::max(jet_rho, (Real)1e-30); pgas = std::max(jet_p, (Real)1e-30); }
+              w(IDN,k,j,i) = rho;
+              w(IPR,k,j,i) = pgas;
+              w(IVX,k,j,i) = vx;
+              w(IVY,k,j,i) = vy;
+              w(IVZ,k,j,i) = vz;
 
 #if defined(RELATIVISTIC_DYNAMICS) && (RELATIVISTIC_DYNAMICS != 0)
-            // keep conserved consistent (SR)
-            Real v2 = vx*vx + vy*vy + vz*vz; v2 = std::min(v2, 1.0 - 1e-12);
-            Real gL = 1.0/std::sqrt(1.0 - v2);
-            Real gamma = pmb->peos->GetGamma();
-            Real h_spec  = 1.0 + (gamma/(gamma - 1.0)) * (pgas / rho);
-            u(IDN,k,j,i) = rho * gL;
-            u(IM1,k,j,i) = rho * h_spec * gL*gL * vx;
-            u(IM2,k,j,i) = rho * h_spec * gL*gL * vy;
-            u(IM3,k,j,i) = rho * h_spec * gL*gL * vz;
-            // total energy density excluding rest mass: tau = rho*h*gamma^2 - p - rho*gamma
-            u(IEN,k,j,i) = rho * h_spec * gL*gL - pgas - rho * gL;
+              Real v2 = vx*vx + vy*vy + vz*vz; v2 = std::min(v2, 1.0 - 1e-12);
+              Real gL = 1.0/std::sqrt(1.0 - v2);
+              Real gamma = pmb->peos->GetGamma();
+              Real h_spec  = 1.0 + (gamma/(gamma - 1.0)) * (pgas / rho);
+              u(IDN,k,j,i) = rho * gL;
+              u(IM1,k,j,i) = rho * h_spec * gL*gL * vx;
+              u(IM2,k,j,i) = rho * h_spec * gL*gL * vy;
+              u(IM3,k,j,i) = rho * h_spec * gL*gL * vz;
+              // total energy density excluding rest mass: tau = rho*h*gamma^2 - p - rho*gamma
+              u(IEN,k,j,i) = rho * h_spec * gL*gL - pgas - rho * gL;
 #else
-            // NR conserved
-            Real v2 = vx*vx + vy*vy + vz*vz;
-            Real gm1 = pmb->peos->GetGamma() - 1.0;
-            u(IDN,k,j,i) = rho;
-            u(IM1,k,j,i) = rho * vx;
-            u(IM2,k,j,i) = rho * vy;
-            u(IM3,k,j,i) = rho * vz;
-            u(IEN,k,j,i) = pgas/gm1 + 0.5*rho*v2;
+              Real v2 = vx*vx + vy*vy + vz*vz;
+              Real gm1 = pmb->peos->GetGamma() - 1.0;
+              u(IDN,k,j,i) = rho;
+              u(IM1,k,j,i) = rho * vx;
+              u(IM2,k,j,i) = rho * vy;
+              u(IM3,k,j,i) = rho * vz;
+              u(IEN,k,j,i) = pgas/gm1 + 0.5*rho*v2;
 #endif
+            } else {
+              // --- CONSERVATIVE SOURCE MODE (add ΔU; do not overwrite primitives) ---
+              Real invG2 = 1.0/(jet_Gam*jet_Gam);
+              Real beta  = std::sqrt(std::max(0.0, 1.0 - invG2));
+              Real dV    = pmb->pcoord->GetCellVolume(k,j,i);
+              Real wgt   = dV / V_tot; // fraction of total source to this cell
+              Real dtloc = pmb->pmy_mesh->dt;
+              // Energy increment (tau excludes rest mass)
+              Real dE = jet_L * dtloc * wgt;
+              // Cold-jet relation: L = (Gamma-1) * Mdot  => Mdot = L/(Gamma-1)
+              Real Mdot = jet_L / std::max((Real)1e-30, (jet_Gam - 1.0));
+              Real dD   = jet_Gam * Mdot * dtloc * wgt;         // ΔD
+              Real dS   = jet_Gam * beta * Mdot * dtloc * wgt;  // |ΔS|
+              u(IDN,k,j,i) += dD;
+              u(IM1,k,j,i) += dS * erx;
+              u(IM2,k,j,i) += dS * ery;
+              u(IM3,k,j,i) += dS * erz;
+              u(IEN,k,j,i) += dE;  // tau increment
+            }
           }
         }
       }
@@ -715,6 +790,10 @@ void Mesh::UserWorkInLoop() {
         std::fprintf(stderr,
           "[jet:step] t=%g nb=%d inj_cells=%lld vmag_avg=%g vmag_max=%g (rinj=%g, Gam=%g)\n",
           (double)time, nb, inj_cells, vmag_avg, vmag_max, (double)jet_rinj, (double)jet_Gam);
+      }
+      if (Globals::my_rank == 0 && jet_mode == 1) {
+        std::fprintf(stderr, "[jet:src] t=%g nb=%d added_E=%g (L=%g dt=%g)\n",
+          (double)time, nb, (double)(jet_L * pmb->pmy_mesh->dt), (double)jet_L, (double)pmb->pmy_mesh->dt);
       }
     }
   }
