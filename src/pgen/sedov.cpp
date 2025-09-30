@@ -21,37 +21,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <fstream>
-#include <vector>
-
-struct PolytropeData {
-  std::vector<double> r, rho, m, P;
-};
-
-// Load a CSV with header "r,rho,m,P"
-static PolytropeData LoadPolytropeCSV(const std::string &filename) {
-  std::ifstream in(filename);
-  if (!in.is_open())
-    throw std::runtime_error("Failed to open " + filename);
-  std::string line;
-  // skip header
-  if (!std::getline(in, line))
-    throw std::runtime_error("Empty file: " + filename);
-  PolytropeData out;
-  while (std::getline(in, line)) {
-    if (line.empty()) continue;
-    std::stringstream ss(line);
-    double rv, rv_rho, rv_m, rv_P;
-    char comma;
-    if (!(ss >> rv >> comma >> rv_rho >> comma >> rv_m >> comma >> rv_P))
-      throw std::runtime_error("Parse error: " + line);
-    out.r.push_back(rv);
-    out.rho.push_back(rv_rho);
-    out.m.push_back(rv_m);
-    out.P.push_back(rv_P);
-  }
-  return out;
-}
 
 // Athena++ headers
 #include "../athena.hpp"
@@ -82,14 +51,12 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 //========================================================================================
 
 void MeshBlock::ProblemGenerator(ParameterInput *pin) {
-  Real rout =  pin->GetReal("problem", "star_radius");
-  Real poly_idx = pin->GetReal("problem", "poly_index");
-  std::string poly_csv_path = pin->GetString("problem", "poly_csv_path");
-  Real r_blast      = pin->GetReal("problem","r_blast");
-  Real blast_factor = pin->GetReal("problem","blast_factor");
-  Real dir_angle_min    = pin->GetReal("problem","dir_angle_min");
-  Real dir_angle_max    = pin->GetReal("problem","dir_angle_max");
-  Real dir_blast_factor = pin->GetReal("problem","dir_blast_factor");
+  Real rout = pin->GetReal("problem", "radius");
+  Real rin  = rout - pin->GetOrAddReal("problem", "ramp", 0.0);
+  Real pa   = pin->GetOrAddReal("problem", "pamb", 1.0);
+  Real da   = pin->GetOrAddReal("problem", "damb", 1.0);
+  Real prat = pin->GetReal("problem", "prat");
+  Real drat = pin->GetOrAddReal("problem", "drat", 1.0);
   Real b0, angle;
   if (MAGNETIC_FIELDS_ENABLED) {
     b0 = pin->GetReal("problem", "b0");
@@ -97,26 +64,6 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   }
   Real gamma = peos->GetGamma();
   Real gm1 = gamma - 1.0;
-  const Real rho_floor = peos->GetDensityFloor();
-  const Real p_floor = peos->GetPressureFloor();
-  Real ambient_rho = pin->GetOrAddReal("problem", "ambient_rho", rho_floor);
-  Real ambient_p = pin->GetOrAddReal("problem", "ambient_p", p_floor);
-  ambient_rho = std::max(ambient_rho, rho_floor);
-  ambient_p = std::max(ambient_p, p_floor);
-
-  // --- debug tables setup ---
-  Real r_fixed      = pin->GetOrAddReal("problem","r_fixed",      0.5*r_blast);
-  Real theta_fixed  = pin->GetOrAddReal("problem","theta_fixed", 3.14159265 );
-  Real phi_fixed    = pin->GetOrAddReal("problem","phi_fixed",    3.14159265);
-  std::vector<std::pair<Real,Real>> phi_table;   // (phi, pgas0)
-  std::vector<std::pair<Real,Real>> theta_table; // (theta, pgas0)
-  // --- end debug tables setup ---
-
-  // Load precomputed polytrope data from CSV
-  static PolytropeData poly;
-  if (poly.r.empty()) {
-    poly = LoadPolytropeCSV(poly_csv_path);
-  }
 
   // get coordinates of center of blast, and convert to Cartesian if necessary
   Real x1_0   = pin->GetOrAddReal("problem", "x1_0", 0.0);
@@ -143,28 +90,6 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
     ATHENA_ERROR(msg);
   }
 
-  // --- debug: generic sampling points (rr,theta,phi) ---
-  struct DebugPoint { Real rr, theta, phi; bool printed; };
-  static std::vector<DebugPoint> dbg_pts;
-  static bool dbg_init = false;
-  const Real tol_rr    = r_blast/20.0;
-  const Real tol_angle = M_PI/20.0;
-  const int  NRR       = 5, NANG = 5;
-  if (!dbg_init) {
-    // sample 5 radii between 0 and r_blast
-    for (int n=0; n<NRR; n++) {
-      dbg_pts.push_back({ (n+1)*r_blast/Real(NRR+1), 0.0, 0.0, false });
-    }
-    // sample NANG angles at fixed theta, varying phi
-    Real theta_fixed = pin->GetOrAddReal("problem","theta_fixed", M_PI/2.0);
-    for (int n=0; n<NANG; n++) {
-      Real phi = n*2.0*M_PI/Real(NANG);
-      dbg_pts.push_back({ 0.0, theta_fixed, phi, false });
-    }
-    dbg_init = true;
-  }
-  // --- end debug init ---
-
   // setup uniform ambient medium with spherical over-pressured region
   for (int k=ks; k<=ke; k++) {
     for (int j=js; j<=je; j++) {
@@ -186,134 +111,40 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           Real z = pcoord->x1v(i)*std::cos(pcoord->x2v(j));
           rad = std::sqrt(SQR(x - x0) + SQR(y - y0) + SQR(z - z0));
         }
-        // compute local azimuthal angle
-        Real rr     = rad;
-        Real r_star = rout;
-        Real rho, pgas;
-        // Interpolate from precomputed polytrope CSV
-        Real rho0, pgas0;
-        {
-          const auto &r_arr   = poly.r;
-          const auto &rho_arr = poly.rho;
-          const auto &P_arr   = poly.P;
-          int N = static_cast<int>(r_arr.size());
-          if (rr <= r_star) {
-            auto it = std::lower_bound(r_arr.begin(), r_arr.end(), rr);
-            int idx = static_cast<int>(std::distance(r_arr.begin(), it));
-            if (idx <= 0) {
-              rho0  = rho_arr[0];
-              pgas0 = P_arr[0];
-            } else if (idx >= N) {
-              rho0  = rho_arr[N-1];
-              pgas0 = P_arr[N-1];
-            } else {
-              double t = (rr - r_arr[idx-1]) / (r_arr[idx] - r_arr[idx-1]);
-              rho0  = rho_arr[idx-1] + t * (rho_arr[idx] - rho_arr[idx-1]);
-              pgas0 = P_arr[idx-1]   + t * (P_arr[idx]   - P_arr[idx-1]);
-            }
-          } else {
-            rho0  = ambient_rho;
-            pgas0 = ambient_p;
+
+        Real den = da;
+        if (rad < rout) {
+          if (rad < rin) {
+            den = drat*da;
+          } else {   // add smooth ramp in density
+            Real f = (rad-rin) / (rout-rin);
+            Real log_den = (1.0-f) * std::log(drat*da) + f * std::log(da);
+            den = std::exp(log_den);
           }
         }
-                // collect debug entries at fixed radius
-        Real theta_dir;
-        if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-          // polar angle θ = arccos((z - z0)/rad)
-          Real zloc = pcoord->x3v(k) - z0;
-          theta_dir = (rad > 0.0 ? std::acos(zloc/ rad) : 0.0);
-        } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-          // in cylindrical axisym, x2v(j) is the azimuthal angle φ, so θ = atan2(|z|, r)
-          Real zloc = pcoord->x3v(k) - z0;
-          Real rloc = pcoord->x1v(i);
-          theta_dir = (rloc > 0.0 ? std::atan2(std::abs(zloc), rloc) : 0.0);
-        } else {  // spherical_polar
-          theta_dir = pcoord->x2v(j) - x2_0;
-        }
 
-        Real phi_dir;
-        if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-          // azimuthal angle φ = atan2(y - y0, x - x0)
-          // compute local x,y relative to blast center
-          Real xloc = pcoord->x1v(i) - x0;
-          Real yloc = pcoord->x2v(j) - y0;
-          phi_dir = std::atan2(yloc, xloc);
-          if (phi_dir < 0.0) phi_dir += 2.0*M_PI;
-        } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-          // φ coordinate in cylindrical, offset by x3_0
-          phi_dir = pcoord->x2v(j) - x3_0;
-          phi_dir = std::fmod(phi_dir + 2.0*M_PI, 2.0*M_PI);
-        } else {  // spherical_polar
-          // φ coordinate in spherical_polar, offset by x3_0
-          phi_dir = pcoord->x3v(k) - x3_0;
-          phi_dir = std::fmod(phi_dir + 2.0*M_PI, 2.0*M_PI);
-        }
-        bool angle_ok = true;
-        bool is2d = (ks == ke);
-
-        // === Collimated kinetic bomb via momentum injection ===
-        // In 2D Cartesian, gate by in-plane azimuth φ around phi0 with width [dir_angle_min, dir_angle_max]
-        if (is2d && std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-          Real phi0 = pin->GetOrAddReal("problem","phi0", 0.0);                    // center direction (radians), default +x
-          bool cone_bipolar = pin->GetOrAddBoolean("problem","cone_bipolar", true); // also include opposite wedge by default
-
-          auto wrap_pm_pi = [](Real a)->Real {
-            a = std::fmod(a + M_PI, 2.0*M_PI);
-            if (a < 0.0) a += 2.0*M_PI;
-            return a - M_PI;
-          };
-
-          Real dphi = wrap_pm_pi(phi_dir - phi0);
-          angle_ok = (dphi >= dir_angle_min && dphi <= dir_angle_max);
-
-          if (cone_bipolar && !angle_ok) {
-            Real dphi2 = wrap_pm_pi(phi_dir - (phi0 + M_PI));
-            angle_ok = (dphi2 >= dir_angle_min && dphi2 <= dir_angle_max);
-          }
-        } else {
-          // In 3D, keep θ gate relative to +z
-          angle_ok = (theta_dir >= dir_angle_min && theta_dir <= dir_angle_max);
-        }
-
-        if (angle_ok && rr <= r_blast) {
-          pgas0 *= dir_blast_factor;
-        }
-
-        // enforce hydro floors so the CFL timestep remains finite even in evacuated cells
-        rho0 = std::max(rho0, rho_floor);
-        pgas0 = std::max(pgas0, p_floor);
-
-        rho  = rho0;
-        pgas = pgas0;
-        phydro->u(IDN,k,j,i) = rho;
+        phydro->u(IDN,k,j,i) = den;
         phydro->u(IM1,k,j,i) = 0.0;
         phydro->u(IM2,k,j,i) = 0.0;
         phydro->u(IM3,k,j,i) = 0.0;
         if (NON_BAROTROPIC_EOS) {
-          phydro->u(IEN,k,j,i) = pgas/(gamma-1.0);
-          if (RELATIVISTIC_DYNAMICS) phydro->u(IEN,k,j,i) += rho;
+          Real pres = pa;
+          if (rad < rout) {
+            if (rad < rin) {
+              pres = prat*pa;
+            } else {  // add smooth ramp in pressure
+              Real f = (rad-rin) / (rout-rin);
+              Real log_pres = (1.0-f) * std::log(prat*pa) + f * std::log(pa);
+              pres = std::exp(log_pres);
+            }
+          }
+          phydro->u(IEN,k,j,i) = pres/gm1;
+          if (RELATIVISTIC_DYNAMICS)  // this should only ever be SR with this file
+            phydro->u(IEN,k,j,i) += den;
         }
       }
     }
   }
-
-  // --- debug tables printout ---
-  static bool tables_printed = false;
-  if (Globals::my_rank == 0 && !tables_printed) {
-    printf("DEBUG TABLE: phi vs pgas at r=%.6f, theta=%.6f\n", r_fixed, theta_fixed);
-    printf("   phi          pgas\n");
-    for (auto &p : phi_table) {
-      printf(" % .6f   % .6e\n", p.first, p.second);
-    }
-    printf("DEBUG TABLE: theta vs pgas at r=%.6f, phi=%.6f\n", r_fixed, phi_fixed);
-    printf("  theta         pgas\n");
-    for (auto &p : theta_table) {
-      printf(" % .6f   % .6e\n", p.first, p.second);
-    }
-    fflush(stdout);
-    tables_printed = true;
-  }
-  // --- end debug tables printout ---
 
   // initialize interface B and total energy
   if (MAGNETIC_FIELDS_ENABLED) {
@@ -387,13 +218,6 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 //========================================================================================
 
 void Mesh::UserWorkAfterLoop(ParameterInput *pin) {
-  // delay AMR enrollment until after first timestep
-  static bool enrolled_amr = false;
-  if (adaptive && !enrolled_amr && time > 0.01) {
-    EnrollUserRefinementCondition(RefinementCondition);
-    enrolled_amr = true;
-  }
-  
   if (!pin->GetOrAddBoolean("problem","compute_error",false)) return;
   MeshBlock *pmb = my_blocks(0);
 
@@ -584,64 +408,36 @@ void Mesh::UserWorkAfterLoop(ParameterInput *pin) {
   return;
 }
 
+
 // refinement condition: check the maximum pressure gradient
 int RefinementCondition(MeshBlock *pmb) {
   AthenaArray<Real> &w = pmb->phydro->w;
-  // compute block center
-  auto &coord = *pmb->pcoord;
-  Real rcen = coord.x1v(pmb->is) + coord.x1v(pmb->ie);
-  rcen *= 0.5;
-  if (rcen > 4.0) return 0;   // no AMR out beyond 4.0R
-
-  Real maxcurv = 0.0;
+  Real maxeps = 0.0;
   if (pmb->pmy_mesh->f3) {
     for (int k=pmb->ks-1; k<=pmb->ke+1; k++) {
       for (int j=pmb->js-1; j<=pmb->je+1; j++) {
         for (int i=pmb->is-1; i<=pmb->ie+1; i++) {
-          Real p_im1 = w(IPR,k,j,i-1);
-          Real p_i   = w(IPR,k,j,i);
-          Real p_ip1 = w(IPR,k,j,i+1);
-          Real d2p1 = (p_ip1 - 2.0*p_i + p_im1)
-                      / SQR(pmb->pcoord->dx1f(i));
-          Real p_jm1 = w(IPR,k,j-1,i);
-          Real p_jp1 = w(IPR,k,j+1,i);
-          Real d2p2 = (p_jp1 - 2.0*p_i + p_jm1)
-                      / SQR(pmb->pcoord->dx2f(j));
-          Real p_km1 = w(IPR,k-1,j,i);
-          Real p_kp1 = w(IPR,k+1,j,i);
-          Real d2p3 = (p_kp1 - 2.0*p_i + p_km1)
-                      / SQR(pmb->pcoord->dx3f(k));
-          Real curv = std::sqrt(d2p1*d2p1 + d2p2*d2p2 + d2p3*d2p3)
-                      / p_i;
-          maxcurv = std::max(maxcurv, curv);
+          Real eps = std::sqrt(SQR(0.5*(w(IPR,k,j,i+1) - w(IPR,k,j,i-1)))
+                               +SQR(0.5*(w(IPR,k,j+1,i) - w(IPR,k,j-1,i)))
+                               +SQR(0.5*(w(IPR,k+1,j,i) - w(IPR,k-1,j,i))))/w(IPR,k,j,i);
+          maxeps = std::max(maxeps, eps);
         }
       }
     }
-  }
-  else if (pmb->pmy_mesh->f2) {
+  } else if (pmb->pmy_mesh->f2) {
     int k = pmb->ks;
     for (int j=pmb->js-1; j<=pmb->je+1; j++) {
       for (int i=pmb->is-1; i<=pmb->ie+1; i++) {
-        Real p_im1 = w(IPR,k,j,i-1);
-        Real p_i   = w(IPR,k,j,i);
-        Real p_ip1 = w(IPR,k,j,i+1);
-        Real d2p1 = (p_ip1 - 2.0*p_i + p_im1)
-                    / SQR(pmb->pcoord->dx1f(i));
-        Real p_jm1 = w(IPR,k,j-1,i);
-        Real p_jp1 = w(IPR,k,j+1,i);
-        Real d2p2 = (p_jp1 - 2.0*p_i + p_jm1)
-                    / SQR(pmb->pcoord->dx2f(j));
-        Real curv = std::sqrt(d2p1*d2p1 + d2p2*d2p2)
-                    / p_i;
-        maxcurv = std::max(maxcurv, curv);
+        Real eps = std::sqrt(SQR(0.5*(w(IPR,k,j,i+1) - w(IPR,k,j,i-1)))
+                             + SQR(0.5*(w(IPR,k,j+1,i) - w(IPR,k,j-1,i))))/w(IPR,k,j,i);
+        maxeps = std::max(maxeps, eps);
       }
     }
-  }
-  else {
+  } else {
     return 0;
   }
 
-  if (maxcurv > threshold) return 1;
-  if (maxcurv < 0.25*threshold) return -1;
+  if (maxeps > threshold) return 1;
+  if (maxeps < 0.25*threshold) return -1;
   return 0;
 }

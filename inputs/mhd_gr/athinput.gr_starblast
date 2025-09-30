@@ -1,0 +1,81 @@
+<comment>
+problem = GR MHD spherical blast wave MY OG EXPERIMENT IN MAKING IT PURE GR
+configure  = --prob=gr_star_blast -g --coord=minkowski -hdf5 --hdf5_path="$CONDA_PREFIX"
+
+<job>
+problem_id = gr_starblast
+
+<output1>
+file_type = hdf5
+variable  = prim
+dt        = 0.002
+id        = h5
+
+
+<time>
+cfl_number = 0.3
+nlim       = -1
+tlim       = 3
+integrator = vl2  # time integration algorithm
+xorder     = 2    # order of spatial reconstruction
+ncycle_out = 1    # interval for stdout summary info
+
+<mesh>
+nx1    = 180       # number of cells in x-direction
+x1min = -4       # a bit above the north pole
+x1max = 4     # maximum x
+ix1_bc = periodic  # left boundary
+ox1_bc = periodic  # right boundary
+
+nx2    = 180                 # polar angle resolution
+x2min = -4                 # a bit above the north pole
+x2max= 4                    # theta = pi
+ix2_bc = periodic              # polar axis (north)
+ox2_bc = periodic               # polar axis (south)
+
+nx3    = 180
+x3min  = -4
+x3max  = 4
+ix3_bc = periodic
+ox3_bc = periodic
+
+
+#refinement     = adaptive
+#numlevel       = 3
+#derefine_count    = 5
+
+<coord>
+m     = 0.0               #Black Hole Mass for Schwartzchild
+
+
+<hydro>
+gamma  = 1.3333333333333333  # ratio of specific heats Gamma
+dfloor = 1.0e-9              # floor on density rho
+pfloor = 1.0e-9              # floor on gas pressure p_gas
+
+<problem>
+
+num_x     = 0           # number of blast centers strictly left and right of central one
+num_y     = 0           # number of blast centers strictly below and above central one
+x_spacing = 0.6         # separation of blast centers in x
+y_spacing = 0.9         # separation of blast centers in y
+
+
+x1_0 = 0
+x2_0 = 0
+x3_0 = 0
+
+poly_G = 1
+
+thr = 1e3
+
+r_blast  = 0.3       # radius of the hot core
+star_radius = 1
+poly_csv_path = /Users/aripollak/athena/polytrope_n3.00.csv
+
+dir_angle_min = -0.2
+dir_angle_max = 0.2
+blast_factor = 1e3
+dir_blast_factor = 0.6
+
+

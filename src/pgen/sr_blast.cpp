@@ -64,7 +64,10 @@ static PolytropeData LoadPolytropeCSV(const std::string &filename) {
 #include "../mesh/mesh.hpp"
 #include "../parameter_input.hpp"
 
+
 Real threshold;
+// cache ParameterInput pointer for use outside ProblemGenerator
+static ParameterInput *g_pin = nullptr;
 
 int RefinementCondition(MeshBlock *pmb);
 
@@ -82,6 +85,9 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 //========================================================================================
 
 void MeshBlock::ProblemGenerator(ParameterInput *pin) {
+  g_pin = pin;
+  // reference to primitive array for velocity assignments
+  auto &w = phydro->w;
   Real rout =  pin->GetReal("problem", "star_radius");
   Real poly_idx = pin->GetReal("problem", "poly_index");
   std::string poly_csv_path = pin->GetString("problem", "poly_csv_path");
@@ -90,6 +96,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   Real dir_angle_min    = pin->GetReal("problem","dir_angle_min");
   Real dir_angle_max    = pin->GetReal("problem","dir_angle_max");
   Real dir_blast_factor = pin->GetReal("problem","dir_blast_factor");
+  Real vel_perturb = pin->GetOrAddReal("problem","vel_perturb",0.1);
   Real b0, angle;
   if (MAGNETIC_FIELDS_ENABLED) {
     b0 = pin->GetReal("problem", "b0");
@@ -97,12 +104,6 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   }
   Real gamma = peos->GetGamma();
   Real gm1 = gamma - 1.0;
-  const Real rho_floor = peos->GetDensityFloor();
-  const Real p_floor = peos->GetPressureFloor();
-  Real ambient_rho = pin->GetOrAddReal("problem", "ambient_rho", rho_floor);
-  Real ambient_p = pin->GetOrAddReal("problem", "ambient_p", p_floor);
-  ambient_rho = std::max(ambient_rho, rho_floor);
-  ambient_p = std::max(ambient_p, p_floor);
 
   // --- debug tables setup ---
   Real r_fixed      = pin->GetOrAddReal("problem","r_fixed",      0.5*r_blast);
@@ -170,22 +171,23 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
     for (int j=js; j<=je; j++) {
       for (int i=is; i<=ie; i++) {
         Real rad;
-        if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-          Real x = pcoord->x1v(i);
-          Real y = pcoord->x2v(j);
-          Real z = pcoord->x3v(k);
-          rad = std::sqrt(SQR(x - x0) + SQR(y - y0) + SQR(z - z0));
-        } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-          Real x = pcoord->x1v(i)*std::cos(pcoord->x2v(j));
-          Real y = pcoord->x1v(i)*std::sin(pcoord->x2v(j));
-          Real z = pcoord->x3v(k);
-          rad = std::sqrt(SQR(x - x0) + SQR(y - y0) + SQR(z - z0));
-        } else { // if (std::strcmp(COORDINATE_SYSTEM, "spherical_polar") == 0)
-          Real x = pcoord->x1v(i)*std::sin(pcoord->x2v(j))*std::cos(pcoord->x3v(k));
-          Real y = pcoord->x1v(i)*std::sin(pcoord->x2v(j))*std::sin(pcoord->x3v(k));
-          Real z = pcoord->x1v(i)*std::cos(pcoord->x2v(j));
-          rad = std::sqrt(SQR(x - x0) + SQR(y - y0) + SQR(z - z0));
+        // compute Cartesian offsets about blast center once
+        Real xloc = 0.0, yloc = 0.0, zloc = 0.0;
+        if (std::strcmp(COORDINATE_SYSTEM,"cartesian")==0) {
+          xloc = pcoord->x1v(i) - x0;
+          yloc = pcoord->x2v(j) - y0;
+          zloc = pcoord->x3v(k) - z0;
+        } else if (std::strcmp(COORDINATE_SYSTEM,"cylindrical")==0) {
+          xloc = pcoord->x1v(i)*std::cos(pcoord->x2v(j)) - x0;
+          yloc = pcoord->x1v(i)*std::sin(pcoord->x2v(j)) - y0;
+          zloc = pcoord->x3v(k)              - z0;
+        } else { // spherical_polar
+          xloc = pcoord->x1v(i)*std::sin(pcoord->x2v(j))*std::cos(pcoord->x3v(k)) - x0;
+          yloc = pcoord->x1v(i)*std::sin(pcoord->x2v(j))*std::sin(pcoord->x3v(k)) - y0;
+          zloc = pcoord->x1v(i)*std::cos(pcoord->x2v(j))                         - z0;
         }
+        Real rloc = std::sqrt(xloc*xloc + yloc*yloc + zloc*zloc);
+        rad = rloc;
         // compute local azimuthal angle
         Real rr     = rad;
         Real r_star = rout;
@@ -212,31 +214,26 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
               pgas0 = P_arr[idx-1]   + t * (P_arr[idx]   - P_arr[idx-1]);
             }
           } else {
-            rho0  = ambient_rho;
-            pgas0 = ambient_p;
+            rho0  = 1.0e-19;
+            pgas0 = 1.0e-19;
           }
         }
                 // collect debug entries at fixed radius
         Real theta_dir;
         if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-          // polar angle θ = arccos((z - z0)/rad)
-          Real zloc = pcoord->x3v(k) - z0;
-          theta_dir = (rad > 0.0 ? std::acos(zloc/ rad) : 0.0);
+          // polar angle θ = arccos(zloc/rloc)
+          theta_dir = (rloc > 0.0 ? std::acos(zloc/ rloc) : 0.0);
         } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-          // in cylindrical axisym, x2v(j) is the azimuthal angle φ, so θ = atan2(|z|, r)
-          Real zloc = pcoord->x3v(k) - z0;
-          Real rloc = pcoord->x1v(i);
-          theta_dir = (rloc > 0.0 ? std::atan2(std::abs(zloc), rloc) : 0.0);
+          // in cylindrical axisym, x2v(j) is the azimuthal angle φ, so θ = atan2(|zloc|, r)
+          Real rr_cyl = pcoord->x1v(i);
+          theta_dir = (rr_cyl > 0.0 ? std::atan2(std::abs(zloc), rr_cyl) : 0.0);
         } else {  // spherical_polar
           theta_dir = pcoord->x2v(j) - x2_0;
         }
 
         Real phi_dir;
         if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-          // azimuthal angle φ = atan2(y - y0, x - x0)
-          // compute local x,y relative to blast center
-          Real xloc = pcoord->x1v(i) - x0;
-          Real yloc = pcoord->x2v(j) - y0;
+          // azimuthal angle φ = atan2(yloc, xloc)
           phi_dir = std::atan2(yloc, xloc);
           if (phi_dir < 0.0) phi_dir += 2.0*M_PI;
         } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
@@ -248,47 +245,82 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           phi_dir = pcoord->x3v(k) - x3_0;
           phi_dir = std::fmod(phi_dir + 2.0*M_PI, 2.0*M_PI);
         }
-        bool angle_ok = true;
-        bool is2d = (ks == ke);
 
-        // === Collimated kinetic bomb via momentum injection ===
-        // In 2D Cartesian, gate by in-plane azimuth φ around phi0 with width [dir_angle_min, dir_angle_max]
-        if (is2d && std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-          Real phi0 = pin->GetOrAddReal("problem","phi0", 0.0);                    // center direction (radians), default +x
-          bool cone_bipolar = pin->GetOrAddBoolean("problem","cone_bipolar", true); // also include opposite wedge by default
-
-          auto wrap_pm_pi = [](Real a)->Real {
-            a = std::fmod(a + M_PI, 2.0*M_PI);
-            if (a < 0.0) a += 2.0*M_PI;
-            return a - M_PI;
-          };
-
-          Real dphi = wrap_pm_pi(phi_dir - phi0);
-          angle_ok = (dphi >= dir_angle_min && dphi <= dir_angle_max);
-
-          if (cone_bipolar && !angle_ok) {
-            Real dphi2 = wrap_pm_pi(phi_dir - (phi0 + M_PI));
-            angle_ok = (dphi2 >= dir_angle_min && dphi2 <= dir_angle_max);
+        // apply inner blast: set initial radial velocity inside r_blast
+        if (rr <= r_blast) {
+          // compute in_lobe once for both Newtonian and relativistic
+          bool in_lobe = false;
+          {
+            Real rxy = std::sqrt(xloc*xloc + yloc*yloc);
+            if (rxy > 0.0) {
+              Real cosphi = xloc / rxy;
+              if (std::fabs(cosphi) >= std::cos(dir_angle_max)) {
+                in_lobe = true;
+              }
+            }
           }
-        } else {
-          // In 3D, keep θ gate relative to +z
-          angle_ok = (theta_dir >= dir_angle_min && theta_dir <= dir_angle_max);
+#ifndef RELATIVISTIC_DYNAMICS
+          // assign initial radial velocity to all cells inside r_blast
+          {
+            Real v0 = pin->GetOrAddReal("problem","v_blast", 0.1);
+            if (rloc > 0.0) {
+              w(IVX,k,j,i) = v0 * xloc/rloc;
+              w(IVY,k,j,i) = v0 * yloc/rloc;
+              w(IVZ,k,j,i) = v0 * zloc/rloc;
+            } else {
+              w(IVX,k,j,i) = 0.0;
+              w(IVY,k,j,i) = 0.0;
+              w(IVZ,k,j,i) = 0.0;
+            }
+          }
+#else
+          // Relativistic: initial radial velocity injection inside r_star in lobes
+          {
+            // read desired blast velocity (default 0.1c)
+            Real v0 = pin->GetOrAddReal("problem","v_blast", 0.1);
+            if (rr <= r_star) {
+              if (in_lobe && rloc > 0.0) {
+                // set radial velocity in direction of (xloc,yloc,zloc)
+                Real vr = v0;
+                w(IVX,k,j,i) = vr * xloc/rloc;
+                w(IVY,k,j,i) = vr * yloc/rloc;
+                w(IVZ,k,j,i) = vr * zloc/rloc;
+              } else {
+                // zero velocity outside lobes
+                w(IVX,k,j,i) = 0.0;
+                w(IVY,k,j,i) = 0.0;
+                w(IVZ,k,j,i) = 0.0;
+              }
+            }
+          }
+#endif
         }
 
-        if (angle_ok && rr <= r_blast) {
-          pgas0 *= dir_blast_factor;
+        // unified debug: print once for each (rr,theta,phi) target
+        if (Globals::my_rank == 0) {
+          for (auto &dp : dbg_pts) {
+            bool match_rr    = (dp.rr > 0.0 && std::fabs(rr - dp.rr) < tol_rr) ||
+                               (dp.rr == 0.0 && rr < r_blast);
+            bool match_theta = std::fabs(theta_dir - dp.theta) < tol_angle;
+            bool match_phi   = std::fabs(phi_dir   - dp.phi)   < tol_angle;
+            if (!dp.printed && match_rr && match_theta && match_phi) {
+              printf("DBG_PT: rr=%.6f θ=%.6f φ=%.6f -> pgas0=%e\n",
+                     dp.rr, dp.theta, dp.phi, pgas0);
+              fflush(stdout);
+              dp.printed = true;
+            }
+          }
         }
-
-        // enforce hydro floors so the CFL timestep remains finite even in evacuated cells
-        rho0 = std::max(rho0, rho_floor);
-        pgas0 = std::max(pgas0, p_floor);
 
         rho  = rho0;
         pgas = pgas0;
         phydro->u(IDN,k,j,i) = rho;
+#ifndef RELATIVISTIC_DYNAMICS
+        // zero momentum in Newtonian mode only
         phydro->u(IM1,k,j,i) = 0.0;
         phydro->u(IM2,k,j,i) = 0.0;
         phydro->u(IM3,k,j,i) = 0.0;
+#endif
         if (NON_BAROTROPIC_EOS) {
           phydro->u(IEN,k,j,i) = pgas/(gamma-1.0);
           if (RELATIVISTIC_DYNAMICS) phydro->u(IEN,k,j,i) += rho;
@@ -381,6 +413,93 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   }
 }
 
+
+// Damp velocities outside the angular lobe only for relativistic runs
+#include <cstdio>
+void MeshBlock::UserWorkInLoop() {
+#ifndef RELATIVISTIC_DYNAMICS
+  return; // do nothing in Newtonian runs
+#else
+  // read (once) the parameters we need
+  static bool inited = false;
+  static Real ang_min, ang_max;
+  static Real clamp_alpha;
+  static Real x1_0, x2_0, x3_0;
+  static Real x0, y0, z0;
+  static Real time_zero, time_end, r_zero;
+  if (!inited) {
+    ParameterInput *pin = g_pin;
+    if (pin == nullptr) return;  // safety
+    ang_min     = pin->GetReal("problem","dir_angle_min");
+    ang_max     = pin->GetReal("problem","dir_angle_max");
+    clamp_alpha = pin->GetOrAddReal("problem","clamp_alpha", 0.0); // 0 => kill, 1 => keep
+    time_zero   = pin->GetOrAddReal("problem","time_zero", 0.1);
+    r_zero      = pin->GetOrAddReal("problem","r_zero",    0.5);
+    time_end    = pin->GetOrAddReal("problem","time_end", time_zero + 0.1);
+    x1_0 = pin->GetOrAddReal("problem","x1_0",0.0);
+    x2_0 = pin->GetOrAddReal("problem","x2_0",0.0);
+    x3_0 = pin->GetOrAddReal("problem","x3_0",0.0);
+    // convert center to Cartesian once
+    if (std::strcmp(COORDINATE_SYSTEM,"cartesian")==0) {
+      x0 = x1_0; y0 = x2_0; z0 = x3_0;
+    } else if (std::strcmp(COORDINATE_SYSTEM,"cylindrical")==0) {
+      x0 = x1_0*std::cos(x2_0);
+      y0 = x1_0*std::sin(x2_0);
+      z0 = x3_0;
+    } else { // spherical_polar
+      x0 = x1_0*std::sin(x2_0)*std::cos(x3_0);
+      y0 = x1_0*std::sin(x2_0)*std::sin(x3_0);
+      z0 = x1_0*std::cos(x2_0);
+    }
+    inited = true;
+  }
+
+  auto &w = phydro->w;
+
+  for (int k=ks; k<=ke; ++k) {
+    for (int j=js; j<=je; ++j) {
+      for (int i=is; i<=ie; ++i) {
+        // Cartesian offsets
+        Real xloc, yloc, zloc;
+        if (std::strcmp(COORDINATE_SYSTEM,"cartesian")==0) {
+          xloc = pcoord->x1v(i)-x0;
+          yloc = pcoord->x2v(j)-y0;
+          zloc = pcoord->x3v(k)-z0;
+        } else if (std::strcmp(COORDINATE_SYSTEM,"cylindrical")==0) {
+          Real r = pcoord->x1v(i), phi = pcoord->x2v(j);
+          xloc = r*std::cos(phi)-x0;
+          yloc = r*std::sin(phi)-y0;
+          zloc = pcoord->x3v(k)-z0;
+        } else { // spherical_polar
+          Real r = pcoord->x1v(i);
+          Real th = pcoord->x2v(j);
+          Real ph = pcoord->x3v(k);
+          xloc = r*std::sin(th)*std::cos(ph)-x0;
+          yloc = r*std::sin(th)*std::sin(ph)-y0;
+          zloc = r*std::cos(th)                -z0;
+        }
+
+        Real rloc = std::sqrt(xloc*xloc + yloc*yloc + zloc*zloc);
+
+        // wedge test (same as in ProblemGenerator)
+        Real rxy = std::sqrt(xloc*xloc + yloc*yloc);
+        bool in_lobe = false;
+        if (rxy > 0.0) {
+          Real cosphi = xloc / rxy;
+          if (std::fabs(cosphi) >= std::cos(ang_max)) in_lobe = true;
+        }
+
+        // after time_zero and before time_end and within r_zero, zero velocities outside lobes
+        if (pmy_mesh->time > time_zero && rloc < r_zero && !in_lobe) {
+          w(IVX,k,j,i) = 0.0;
+          w(IVY,k,j,i) = 0.0;
+          w(IVZ,k,j,i) = 0.0;
+        }
+      }
+    }
+  }
+#endif
+}
 //========================================================================================
 //! \fn void Mesh::UserWorkAfterLoop(ParameterInput *pin)
 //! \brief Check radius of sphere to make sure it is round
@@ -584,6 +703,7 @@ void Mesh::UserWorkAfterLoop(ParameterInput *pin) {
   return;
 }
 
+
 // refinement condition: check the maximum pressure gradient
 int RefinementCondition(MeshBlock *pmb) {
   AthenaArray<Real> &w = pmb->phydro->w;
@@ -591,7 +711,7 @@ int RefinementCondition(MeshBlock *pmb) {
   auto &coord = *pmb->pcoord;
   Real rcen = coord.x1v(pmb->is) + coord.x1v(pmb->ie);
   rcen *= 0.5;
-  if (rcen > 4.0) return 0;   // no AMR out beyond 4.0R
+  if (rcen > 6.0) return 0;   // no AMR out beyond 6.0R
 
   Real maxcurv = 0.0;
   if (pmb->pmy_mesh->f3) {
@@ -640,8 +760,33 @@ int RefinementCondition(MeshBlock *pmb) {
   else {
     return 0;
   }
-
+    // decide refine/derefine based on curvature threshold
   if (maxcurv > threshold) return 1;
   if (maxcurv < 0.25*threshold) return -1;
   return 0;
 }
+//  if (maxcurv > threshold) return 1;
+//  if (maxcurv < 0.25*threshold) return -1;
+//  return 0;
+// }
+//  if (pmb->pmy_mesh->f3) {
+//    for (int k=pmb->ks-1; k<=pmb->ke+1; k++) {
+//      for (int j=pmb->js-1; j<=pmb->je+1; j++) {
+//        for (int i=pmb->is-1; i<=pmb->ie+1; i++) {
+//          Real eps = std::sqrt(SQR(0.5*(w(IPR,k,j,i+1) - w(IPR,k,j,i-1)))
+//                               +SQR(0.5*(w(IPR,k,j+1,i) - w(IPR,k,j-1,i)))
+//                               +SQR(0.5*(w(IPR,k+1,j,i) - w(IPR,k-1,j,i))))/w(IPR,k,j,i);
+//          maxeps = std::max(maxeps, eps);
+//        }
+//      }
+//    }
+//  } else if (pmb->pmy_mesh->f2) {
+//    int k = pmb->ks;
+//    for (int j=pmb->js-1; j<=pmb->je+1; j++) {
+//      for (int i=pmb->is-1; i<=pmb->ie+1; i++) {
+//        Real eps = std::sqrt(SQR(0.5*(w(IPR,k,j,i+1) - w(IPR,k,j,i-1)))
+//                             + SQR(0.5*(w(IPR,k,j+1,i) - w(IPR,k,j-1,i))))/w(IPR,k,j,i);
+//        maxeps = std::max(maxeps, eps);
+//      }
+//    }
+// grad(logarithm of density/pressure)

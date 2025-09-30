@@ -1,0 +1,82 @@
+<comment>
+problem   = spherical MHD blast wave in spherical coordinates
+reference = Gardiner. T.A. & Stone, J.M., JCP, 205, 509 (2005) (for MHD version of test)
+configure = --prob=blast --coord=cartesian -hdf5 --hdf5_path="$CONDA_PREFIX"
+
+<job>
+problem_id = Blast      # problem ID: basename of output filenames
+
+<output1>
+file_type  = hdf5        # Binary data dump
+variable   = prim       # variables to be output
+dt         = 0.0001       # time increment between outputs
+ncycle_out = 1  
+
+<time>
+cfl_number = 0.3        # The Courant, Friedrichs, & Lewy (CFL) Number
+nlim       = -1         # cycle limit 
+tlim       = 0.03       # time limit
+integrator  = vl2       # time integration algorithm
+xorder      = 2         # order of spatial reconstruction
+ncycle_out  = 1         # interval for stdout summary info
+
+<mesh>
+nx1        = 250         # Number of zones in X1-direction
+x1min      = -5        # minimum value of X1
+x1max      = 5      # maximum value of X1
+ix1_bc     = outflow    # inner-X1 boundary flag
+ox1_bc     = outflow    # outer-X1 boundary flag
+
+nx2        = 250            # Number of zones in X2-direction
+x2min      = -5  # minimum value of X2
+x2max      = 5  # maximum value of X2
+ix2_bc     = outflow        # inner-X2 boundary flag
+ox2_bc     = outflow      # outer-X2 boundary flag
+
+nx3        = 1             # Number of zones in X3-direction
+x3min      = -5 # minimum value of X3
+x3max      = 5 # maximum value of X3
+ix3_bc     = periodic      # inner-X3 boundary flag
+ox3_bc     = periodic        # outer-X3 boundary flag
+
+refinement     = adaptive
+numlevel       = 3
+derefine_count    = 5
+
+
+<hydro>
+gamma           = 1.3333333333333333  # gamma = C_p/C_v
+dfloor          = 1e-5               # light background medium to keep CFL time finite
+pfloor          = 1e-7               # coupled pressure floor (sets ambient sound speed)
+#iso_sound_speed = 1.0
+
+<problem>
+compute_error = false         # check whether blast is spherical at end
+star_radius = 1.0 
+poly_index = 3.00
+poly_N = 1e4
+poly_G =10.0
+poly_imax = 1e4
+poly_tol = 1e10
+poly_csv_path = /Users/aripollak/athena/polytrope_n3.00.csv
+
+r_blast = 0.3
+blast_factor = 1e2 ###PV/gamma-1
+dir_blast_factor = 1e6
+dir_angle_min = -0.2     
+dir_angle_max = 0.2    
+
+thr               = 1e2
+
+clamp_tstart   = 0.03      # start clamping after this time
+clamp_period   = 0.05     # apply every this many code units (optional)
+clamp_alpha    = 0.0       # 0 => kill velocity, 0.5 => halve it, 1 => no change
+
+
+x1_0          = 0           # r-coord of center of blast
+x2_0          = 0  # theta-coord of center of blast (pi/3)
+x3_0          = 0.0           # phi-coord of center of blast
+b0            = 1.0           # magnetic field strength
+angle         = 30            # angle from x-axis to magnetic field
+ambient_rho   = 1e-5          # density of ambient medium outside the stellar profile
+ambient_p     = 1e-7          # pressure of the ambient medium outside the stellar profile
