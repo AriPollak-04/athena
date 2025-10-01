@@ -65,11 +65,14 @@ dir_angle_max   = 0.3
 cone_bipolar    = true
 
 # jet
-t_stop          = 0.5
-jet_rinj        = 0.1
-jet_Gam         = 40.0
+t_stop          = 0.2
+jet_rinj        = 0.05
+jet_Gam         = 80.0
 jet_rho         = 1
 jet_p           = 1
+
+
+sr_energy_convention = etot
 
 # center
 x1_0 = 0.0
@@ -77,15 +80,10 @@ x2_0 = 0.0
 x3_0 = 0.0
 
 # Misc
-thr            = 2
-
-# Center
-x1_0 = 0.0
-x2_0 = 0.0
-x3_0 = 0.0
+thr            = 0.01
 
 #For physical blast
-E_jet = 0.3
+E_jet = 0.5
 jet_mode = source
 theta_j  = 0.3             # half-opening angle (optional convenience)
 phi0     = 0.0

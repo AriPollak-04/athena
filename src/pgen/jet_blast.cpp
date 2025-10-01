@@ -93,6 +93,8 @@ static Real jet_L      = 0.0;     // computed luminosity = E_tot / t_stop (if en
 static Real gate_omega = -1.0;    // solid angle of the gate (3D only); -1 means compute on init
 // driving mode: 0 = overwrite primitives in nozzle; 1 = conservative source (add ΔU)
 static int  jet_mode = 0;
+// Energy convention for SR hydro: 1 = tau (exclude rest mass), 0 = Etot (include rest mass)
+static int sr_energy_tau = 1; // default to tau (Athena++ SR convention)
 // optional convenience input: half-opening angle; if >=0 it sets dir_angle_min/max automatically
 static Real theta_j = -1.0;
 // ----------------------------------------------------------
@@ -149,6 +151,11 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     }
   }
 
+  // Optional: allow choosing SR energy convention for robustness/debugging
+  // problem/sr_energy_convention = "tau" (default) or "etot"
+  std::string srE = pin->GetOrAddString("problem", "sr_energy_convention", "tau");
+  sr_energy_tau = (srE == "tau" || srE == "TAU") ? 1 : 0;
+
   // For 3D runs, precompute the gate solid angle Ω; for 2D we will treat normalization per-unit-length
   if (nblocal > 0) {
     MeshBlock *pmb0 = my_blocks(0);
@@ -167,11 +174,12 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   if (Globals::my_rank == 0) {
     std::fprintf(stderr,
-      "[jet:init] mode=%s enabled=%d  t_stop=%g  rinj=%g  Gam=%g  (rho=%g p=%g)  E_jet=%g  L=%g  mu=%g  fth=%g  Omega=%g  theta_j=%g  gate=[%g,%g] phi0=%g bipolar=%d\n",
+      "[jet:init] mode=%s enabled=%d  t_stop=%g  rinj=%g  Gam=%g  (rho=%g p=%g)  E_jet=%g  L=%g  mu=%g  fth=%g  Omega=%g  theta_j=%g  gate=[%g,%g] phi0=%g bipolar=%d  SR_E=%s\n",
       (jet_mode==1?"source":"overwrite"), (int)jet_enabled, (double)jet_t_stop, (double)jet_rinj, (double)jet_Gam,
       (double)jet_rho, (double)jet_p, (double)jet_E_tot, (double)jet_L,
       (double)jet_mu, (double)jet_fth, (double)gate_omega, (double)theta_j,
-      (double)gate_dir_min, (double)gate_dir_max, (double)gate_phi0, (int)gate_cone_bipolar);
+      (double)gate_dir_min, (double)gate_dir_max, (double)gate_phi0,
+      (int)gate_cone_bipolar, (sr_energy_tau?"tau":"etot"));
   }
   breakout_params_inited = true;
   return;
@@ -419,9 +427,20 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         phydro->u(IM1,k,j,i) = momx;
         phydro->u(IM2,k,j,i) = momy;
         phydro->u(IM3,k,j,i) = momz;
-        phydro->u(IEN,k,j,i) = Etot;
+        if (sr_energy_tau) {
+          // store tau (exclude rest mass)
+          phydro->u(IEN,k,j,i) = Etot - D;
+        } else {
+          // store Etot (include rest mass)
+          phydro->u(IEN,k,j,i) = Etot;
+        }
         // diagnostic: v^2 sanity
         if (!std::isfinite(v2)) nan_v2++;
+        // catch obviously bad initial energies
+        if (!std::isfinite(phydro->u(IEN,k,j,i)) || phydro->u(IEN,k,j,i) <= 0.0) {
+          // keep a tiny positive energy to avoid inversion failure
+          phydro->u(IEN,k,j,i) = std::max(phydro->u(IEN,k,j,i), (Real)1e-30);
+        }
         #else
         // Non-relativistic conserved variables
         Real v2 = vx*vx + vy*vy + vz*vz;  // for diagnostics
@@ -586,6 +605,11 @@ void Mesh::UserWorkInLoop() {
   if (jet_enabled && (time <= jet_t_stop)) {
     for (int nb=0; nb<nblocal; ++nb) {
       MeshBlock* pmb = my_blocks(nb);
+      // --- diagnostics for nozzle geometry ---
+      long long c_within_r = 0;     // cells within r_inj (before angle gate)
+      long long c_after_gate = 0;   // cells within r_inj AND angle gate
+      Real min_rad_seen = 1e30;     // smallest radius from center in this block
+      Real sample_dphi   = 0.0;     // example dphi for nearest cell in 2D cartesian
       auto &coord = *pmb->pcoord;
       AthenaArray<Real> &w = pmb->phydro->w;
       AthenaArray<Real> &u = pmb->phydro->u;
@@ -630,6 +654,10 @@ void Mesh::UserWorkInLoop() {
               Real x,y,z; cell_to_cart(pmb, k, j, i, x, y, z);
               Real dx = x - breakout_x1_0, dy = y - breakout_x2_0, dz = z - breakout_x3_0;
               Real rad = std::sqrt(dx*dx + dy*dy + dz*dz);
+              // --- diagnostics: count and track geometry ---
+              if (rad < min_rad_seen) min_rad_seen = rad;
+              if (rad <= jet_rinj) c_within_r++;
+              // --- end diagnostics ---
               if (rad > jet_rinj) continue;
               // Minimal angle gate (same as main logic)
               bool is2d = (pmb->ks == pmb->ke);
@@ -649,10 +677,20 @@ void Mesh::UserWorkInLoop() {
               } else { theta_dir = pmb->pcoord->x2v(j) - breakout_x2_0; phi_dir = pmb->pcoord->x3v(k) - breakout_x3_0; phi_dir = std::fmod(phi_dir + 2.0*M_PI, 2.0*M_PI); }
               if (is2d && std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
                 auto wrap_pm_pi = [](Real a)->Real { a = std::fmod(a + M_PI, 2.0*M_PI); if (a < 0.0) a += 2.0*M_PI; return a - M_PI; };
-                Real dphi = wrap_pm_pi(phi_dir - gate_phi0);
-                angle_ok = (dphi >= gate_dir_min && dphi <= gate_dir_max);
-                if (gate_cone_bipolar && !angle_ok) { Real dphi2 = wrap_pm_pi(phi_dir - (gate_phi0 + M_PI)); angle_ok = (dphi2 >= gate_dir_min && dphi2 <= gate_dir_max); }
-              } else { angle_ok = (theta_dir >= gate_dir_min && theta_dir <= gate_dir_max); }
+                Real dphi  = wrap_pm_pi(phi_dir - gate_phi0);
+                if (rad == min_rad_seen) sample_dphi = dphi;
+                bool angle_ok_primary = (dphi >= gate_dir_min && dphi <= gate_dir_max);
+                bool angle_ok_bip = false;
+                if (gate_cone_bipolar) {
+                  Real dphi2 = wrap_pm_pi(phi_dir - (gate_phi0 + M_PI));
+                  angle_ok_bip = (dphi2 >= gate_dir_min && dphi2 <= gate_dir_max);
+                }
+                angle_ok = angle_ok_primary || angle_ok_bip;
+                if (angle_ok) c_after_gate++;
+              } else {
+                angle_ok = (theta_dir >= gate_dir_min && theta_dir <= gate_dir_max);
+                if (angle_ok) c_after_gate++;
+              }
               if (!angle_ok) continue;
               V_tot += pmb->pcoord->GetCellVolume(k,j,i);
             }
@@ -701,12 +739,14 @@ void Mesh::UserWorkInLoop() {
 
             if (is2d && std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
               auto wrap_pm_pi = [](Real a)->Real { a = std::fmod(a + M_PI, 2.0*M_PI); if (a < 0.0) a += 2.0*M_PI; return a - M_PI; };
-              Real dphi = wrap_pm_pi(phi_dir - gate_phi0);
-              angle_ok = (dphi >= gate_dir_min && dphi <= gate_dir_max);
-              if (gate_cone_bipolar && !angle_ok) {
+              Real dphi  = wrap_pm_pi(phi_dir - gate_phi0);
+              bool angle_ok_primary = (dphi >= gate_dir_min && dphi <= gate_dir_max);
+              bool angle_ok_bip = false;
+              if (gate_cone_bipolar) {
                 Real dphi2 = wrap_pm_pi(phi_dir - (gate_phi0 + M_PI));
-                angle_ok = (dphi2 >= gate_dir_min && dphi2 <= gate_dir_max);
+                angle_ok_bip = (dphi2 >= gate_dir_min && dphi2 <= gate_dir_max);
               }
+              angle_ok = angle_ok_primary || angle_ok_bip;
             } else {
               angle_ok = (theta_dir >= gate_dir_min && theta_dir <= gate_dir_max);
             }
@@ -752,8 +792,9 @@ void Mesh::UserWorkInLoop() {
               u(IM1,k,j,i) = rho * h_spec * gL*gL * vx;
               u(IM2,k,j,i) = rho * h_spec * gL*gL * vy;
               u(IM3,k,j,i) = rho * h_spec * gL*gL * vz;
-              // total energy density excluding rest mass: tau = rho*h*gamma^2 - p - rho*gamma
-              u(IEN,k,j,i) = rho * h_spec * gL*gL - pgas - rho * gL;
+              Real tau  = rho * h_spec * gL*gL - pgas - rho * gL;
+              Real Etot = tau + rho * gL; // include rest mass if requested
+              u(IEN,k,j,i) = sr_energy_tau ? tau : Etot;
 #else
               Real v2 = vx*vx + vy*vy + vz*vz;
               Real gm1 = pmb->peos->GetGamma() - 1.0;
@@ -780,7 +821,12 @@ void Mesh::UserWorkInLoop() {
               u(IM1,k,j,i) += dS * erx;
               u(IM2,k,j,i) += dS * ery;
               u(IM3,k,j,i) += dS * erz;
-              u(IEN,k,j,i) += dE;  // tau increment
+              // energy increment: if storing tau, add dE; if storing Etot, add dE plus rest-mass energy dD
+              if (sr_energy_tau) {
+                u(IEN,k,j,i) += dE;      // tau increment (exclude rest mass)
+              } else {
+                u(IEN,k,j,i) += (dE + dD); // Etot increment (include rest mass contribution)
+              }
             }
           }
         }
@@ -794,6 +840,13 @@ void Mesh::UserWorkInLoop() {
       if (Globals::my_rank == 0 && jet_mode == 1) {
         std::fprintf(stderr, "[jet:src] t=%g nb=%d added_E=%g (L=%g dt=%g)\n",
           (double)time, nb, (double)(jet_L * pmb->pmy_mesh->dt), (double)jet_L, (double)pmb->pmy_mesh->dt);
+      }
+      // --- geometry diagnostics ---
+      if (Globals::my_rank == 0) {
+        std::fprintf(stderr,
+          "[jet:geo] t=%g nb=%d rinj=%g min_rad=%g within_r=%lld after_gate=%lld theta=[%g,%g] phi0=%g\n",
+          (double)time, nb, (double)jet_rinj, (double)min_rad_seen, c_within_r, c_after_gate,
+          (double)gate_dir_min, (double)gate_dir_max, (double)gate_phi0);
       }
     }
   }
@@ -1068,56 +1121,49 @@ int RefinementCondition(MeshBlock *pmb) {
   rcen *= 0.5;
   if (rcen > 4.0) return 0;   // no AMR out beyond 4.0R
 
-  Real maxcurv = 0.0;
+    auto velocity_jump = [&](int kk, int jj, int ii,
+                           int kn, int jn, int in) -> Real {
+    Real dvx = w(IVX, kk, jj, ii) - w(IVX, kn, jn, in);
+    Real dvy = w(IVY, kk, jj, ii) - w(IVY, kn, jn, in);
+    Real dvz = 0.0;
+    if (pmb->pmy_mesh->f3 || pmb->block_size.nx3 > 1) {
+      dvz = w(IVZ, kk, jj, ii) - w(IVZ, kn, jn, in);
+    }
+    return std::sqrt(dvx*dvx + dvy*dvy + dvz*dvz);
+  };
+  Real max_jump = 0.0;
   if (pmb->pmy_mesh->f3) {
-    for (int k=pmb->ks-1; k<=pmb->ke+1; k++) {
-      for (int j=pmb->js-1; j<=pmb->je+1; j++) {
-        for (int i=pmb->is-1; i<=pmb->ie+1; i++) {
-          Real p_im1 = w(IPR,k,j,i-1);
-          Real p_i   = w(IPR,k,j,i);
-          Real p_ip1 = w(IPR,k,j,i+1);
-          Real d2p1 = (p_ip1 - 2.0*p_i + p_im1)
-                      / SQR(pmb->pcoord->dx1f(i));
-          Real p_jm1 = w(IPR,k,j-1,i);
-          Real p_jp1 = w(IPR,k,j+1,i);
-          Real d2p2 = (p_jp1 - 2.0*p_i + p_jm1)
-                      / SQR(pmb->pcoord->dx2f(j));
-          Real p_km1 = w(IPR,k-1,j,i);
-          Real p_kp1 = w(IPR,k+1,j,i);
-          Real d2p3 = (p_kp1 - 2.0*p_i + p_km1)
-                      / SQR(pmb->pcoord->dx3f(k));
-          Real curv = std::sqrt(d2p1*d2p1 + d2p2*d2p2 + d2p3*d2p3)
-                      / p_i;
-          maxcurv = std::max(maxcurv, curv);
+    for (int k = pmb->ks; k <= pmb->ke; ++k) {
+      for (int j = pmb->js; j <= pmb->je; ++j) {
+        for (int i = pmb->is; i <= pmb->ie; ++i) {
+          Real local_jump = 0.0;
+          local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j, i-1));
+          local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j, i+1));
+          local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j-1, i));
+          local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j+1, i));
+          local_jump = std::max(local_jump, velocity_jump(k, j, i, k-1, j, i));
+          local_jump = std::max(local_jump, velocity_jump(k, j, i, k+1, j, i));
+          max_jump = std::max(max_jump, local_jump);
         }
       }
     }
-  }
-  else if (pmb->pmy_mesh->f2) {
+  } else if (pmb->pmy_mesh->f2) {
     int k = pmb->ks;
-    for (int j=pmb->js-1; j<=pmb->je+1; j++) {
-      for (int i=pmb->is-1; i<=pmb->ie+1; i++) {
-        Real p_im1 = w(IPR,k,j,i-1);
-        Real p_i   = w(IPR,k,j,i);
-        Real p_ip1 = w(IPR,k,j,i+1);
-        Real d2p1 = (p_ip1 - 2.0*p_i + p_im1)
-                    / SQR(pmb->pcoord->dx1f(i));
-        Real p_jm1 = w(IPR,k,j-1,i);
-        Real p_jp1 = w(IPR,k,j+1,i);
-        Real d2p2 = (p_jp1 - 2.0*p_i + p_jm1)
-                    / SQR(pmb->pcoord->dx2f(j));
-        Real curv = std::sqrt(d2p1*d2p1 + d2p2*d2p2)
-                    / p_i;
-        maxcurv = std::max(maxcurv, curv);
+    for (int j = pmb->js; j <= pmb->je; ++j) {
+      for (int i = pmb->is; i <= pmb->ie; ++i) {
+        Real local_jump = 0.0;
+        local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j, i-1));
+        local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j, i+1));
+        local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j-1, i));
+        local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j+1, i));
+        max_jump = std::max(max_jump, local_jump);
       }
     }
-  }
-  else {
+  } else {
     return 0;
   }
 
-  if (maxcurv > threshold) return 1;
-  if (maxcurv < 0.25*threshold) return -1;
+  if (max_jump > threshold) return 1;
+  if (max_jump < 0.25*threshold) return -1;
   return 0;
-
-}
+ }
