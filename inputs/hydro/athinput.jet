@@ -16,27 +16,27 @@ dt         = 1.0      # time increment between outputs
 <time>
 cfl_number = 0.4      # The Courant, Friedrichs, & Lewy (CFL) Number
 nlim       = -1       # cycle limit
-tlim       = 300.0    # time limit
+tlim       = 300   # time limit
 integrator  = vl2       # time integration algorithm
 xorder      = 2         # order of spatial reconstruction
 ncycle_out  = 1         # interval for stdout summary info
 
 <mesh>
-nx1        = 300      # Number of zones in X1-direction
+nx1        = 400      # Number of zones in X1-direction
 x1min      = 0.0      # minimum value of X1
-x1max      = 60.0     # maximum value of X1
+x1max      = 80.0     # maximum value of X1
 ix1_bc     = user     # inner-X1 boundary flag
 ox1_bc     = outflow  # outer-X1 boundary flag
 
-nx2        = 300      # Number of zones in X2-direction
-x2min      = -25.0    # minimum value of X2
-x2max      = 25.0     # maximum value of X2
+nx2        = 400      # Number of zones in X2-direction
+x2min      = -45.0    # minimum value of X2
+x2max      = 45.0     # maximum value of X2
 ix2_bc     = outflow  # inner-X2 boundary flag
 ox2_bc     = outflow  # outer-X2 boundary flag
 
 nx3        = 1        # Number of zones in X3-direction
-x3min      = -25.0    # minimum value of X3
-x3max      = 25.0     # maximum value of X3
+x3min      = -45.0    # minimum value of X3
+x3max      = 45.0     # maximum value of X3
 ix3_bc     = outflow  # inner-X3 boundary flag
 ox3_bc     = outflow  # outer-X3 boundary flag
 
@@ -52,6 +52,8 @@ vz = 0.0
 bx = 0.1
 by = 0.4
 bz = 0.0
+
+t_stop = 10.0
 
 x1_0 = 0.0
 x2_0 = 0.0

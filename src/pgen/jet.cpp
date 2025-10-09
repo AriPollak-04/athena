@@ -71,6 +71,7 @@ namespace {
 Real d_amb, p_amb, vx_amb, vy_amb, vz_amb, bx_amb, by_amb, bz_amb;
 Real r_jet, d_jet, p_jet, vx_jet, vy_jet, vz_jet, bx_jet, by_jet, bz_jet;
 Real gm1, x2_0, x3_0;
+Real t_stop;
 } // namespace
 
 //========================================================================================
@@ -97,6 +98,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   vx_jet = pin->GetReal("problem", "vxjet");
   vy_jet = pin->GetReal("problem", "vyjet");
   vz_jet = pin->GetReal("problem", "vzjet");
+  t_stop = pin->GetReal("problem", "t_stop");
   if (MAGNETIC_FIELDS_ENABLED) {
     bx_jet = pin->GetReal("problem", "bxjet");
     by_jet = pin->GetReal("problem", "byjet");
@@ -258,12 +260,14 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 void JetInnerX1(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim, FaceField &b,
                 Real time, Real dt,
                 int il, int iu, int jl, int ju, int kl, int ku, int ngh) {
+  const bool jet_active = (t_stop <= 0.0) || (time <= t_stop);
   // set primitive variables in inlet ghost zones
   for (int k=kl; k<=ku; ++k) {
     for (int j=jl; j<=ju; ++j) {
       for (int i=1; i<=ngh; ++i) {
         Real rad = std::sqrt(SQR(pco->x2v(j)-x2_0) + SQR(pco->x3v(k)-x3_0));
-        if (rad <= r_jet) {
+        const bool in_nozzle = (rad<=r_jet);
+        if (in_nozzle && jet_active) {
           prim(IDN,k,j,il-i) = d_jet;
           prim(IVX,k,j,il-i) = vx_jet;
           prim(IVY,k,j,il-i) = vy_jet;

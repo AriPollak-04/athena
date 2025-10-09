@@ -65,11 +65,15 @@ dir_angle_max   = 0.3
 cone_bipolar    = true
 
 # jet
-t_stop          = 0.2
-jet_rinj        = 0.05
-jet_Gam         = 80.0
-jet_rho         = 1
-jet_p           = 1
+t_stop        = 1.50
+jet_rinj      = 0.1
+jet_Gam       = 20
+jet_rho       = 1e-5
+jet_p         = 1e-6
+phi0          = 0.0
+cone_bipolar  = true
+vtheta_frac   = 0.2
+sr_energy_convention = tau    # or etot
 
 
 sr_energy_convention = etot
@@ -83,10 +87,7 @@ x3_0 = 0.0
 thr            = 0.01
 
 #For physical blast
-E_jet = 0.5
-jet_mode = source
-theta_j  = 0.3             # half-opening angle (optional convenience)
-phi0     = 0.0
+
 
 
 # FOR TRACKING SHOCK BREAKOUT
