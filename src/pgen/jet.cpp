@@ -11,6 +11,43 @@
 
 // C++ headers
 #include <cmath>      // sqrt()
+#include <cstdio>     // fopen(), fprintf(), freopen()
+#include <cstring>    // strcmp()
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <fstream>
+#include <vector>
+#include <algorithm>
+
+
+struct PolytropeData {
+  std::vector<double> r, rho, m, P;
+};
+// Load a CSV with header "r,rho,m,P"
+static PolytropeData LoadPolytropeCSV(const std::string &filename) {
+  std::ifstream in(filename);
+  if (!in.is_open())
+    throw std::runtime_error("Failed to open " + filename);
+  std::string line;
+  // skip header
+  if (!std::getline(in, line))
+    throw std::runtime_error("Empty file: " + filename);
+  PolytropeData out;
+  while (std::getline(in, line)) {
+    if (line.empty()) continue;
+    std::stringstream ss(line);
+    double rv, rv_rho, rv_m, rv_P;
+    char comma;
+    if (!(ss >> rv >> comma >> rv_rho >> comma >> rv_m >> comma >> rv_P))
+      throw std::runtime_error("Parse error: " + line);
+    out.r.push_back(rv);
+    out.rho.push_back(rv_rho);
+    out.m.push_back(rv_m);
+    out.P.push_back(rv_P);
+  }
+  return out;
+}
 
 // Athena++ headers
 #include "../athena.hpp"
@@ -80,18 +117,97 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 //  \brief Problem Generator for the Jet problem
 void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   gm1 = peos->GetGamma() - 1.0;
+  std::string poly_csv_path = pin->GetString("problem", "poly_csv_path");
+  Real rout = pin->GetReal("problem", "rout");
+      // Load precomputed polytrope data from CSV
+  static PolytropeData poly;
+  if (poly.r.empty()) {
+    poly = LoadPolytropeCSV(poly_csv_path);
+  }
+    // get coordinates of center of blast, and convert to Cartesian if necessary
+  Real x1_0   = pin->GetOrAddReal("problem", "x1_0", 0.0);
+  Real x2_0   = pin->GetOrAddReal("problem", "x2_0", 0.0);
+  Real x3_0   = pin->GetOrAddReal("problem", "x3_0", 0.0);
+  Real x0, y0, z0;
+  if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+    x0 = x1_0;
+    y0 = x2_0;
+    z0 = x3_0;
+  } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+    x0 = x1_0*std::cos(x2_0);
+    y0 = x1_0*std::sin(x2_0);
+    z0 = x3_0;
+  } else if (std::strcmp(COORDINATE_SYSTEM, "spherical_polar") == 0) {
+    x0 = x1_0*std::sin(x2_0)*std::cos(x3_0);
+    y0 = x1_0*std::sin(x2_0)*std::sin(x3_0);
+    z0 = x1_0*std::cos(x2_0);
+  } else {
+    // Only check legality of COORDINATE_SYSTEM once in this function
+    std::stringstream msg;
+    msg << "### FATAL ERROR in blast.cpp ProblemGenerator" << std::endl
+        << "Unrecognized COORDINATE_SYSTEM=" << COORDINATE_SYSTEM << std::endl;
+    ATHENA_ERROR(msg);
+  }
 
   // initialize conserved variables
   for (int k=ks; k<=ke; ++k) {
     for (int j=js; j<=je; ++j) {
       for (int i=is; i<=ie; ++i) {
-        phydro->u(IDN,k,j,i) = d_amb;
-        phydro->u(IM1,k,j,i) = d_amb*vx_amb;
-        phydro->u(IM2,k,j,i) = d_amb*vy_amb;
-        phydro->u(IM3,k,j,i) = d_amb*vz_amb;
+                Real rad;
+        if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+          Real x = pcoord->x1v(i);
+          Real y = pcoord->x2v(j);
+          Real z = pcoord->x3v(k);
+          rad = std::sqrt(SQR(x - x0) + SQR(y - y0) + SQR(z - z0));
+        } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+          Real x = pcoord->x1v(i)*std::cos(pcoord->x2v(j));
+          Real y = pcoord->x1v(i)*std::sin(pcoord->x2v(j));
+          Real z = pcoord->x3v(k);
+          rad = std::sqrt(SQR(x - x0) + SQR(y - y0) + SQR(z - z0));
+        } else { // if (std::strcmp(COORDINATE_SYSTEM, "spherical_polar") == 0)
+          Real x = pcoord->x1v(i)*std::sin(pcoord->x2v(j))*std::cos(pcoord->x3v(k));
+          Real y = pcoord->x1v(i)*std::sin(pcoord->x2v(j))*std::sin(pcoord->x3v(k));
+          Real z = pcoord->x1v(i)*std::cos(pcoord->x2v(j));
+          rad = std::sqrt(SQR(x - x0) + SQR(y - y0) + SQR(z - z0));
+        }
+        // compute local azimuthal angle
+        Real rr     = rad;
+        Real r_star = rout;
+        Real rho, pgas;
+        // Interpolate from precomputed polytrope CSV
+        Real rho0, pgas0;
+        {
+          const auto &r_arr   = poly.r;
+          const auto &rho_arr = poly.rho;
+          const auto &P_arr   = poly.P;
+          int N = static_cast<int>(r_arr.size());
+          if (rr <= r_star) {
+            auto it = std::lower_bound(r_arr.begin(), r_arr.end(), rr);
+            int idx = static_cast<int>(std::distance(r_arr.begin(), it));
+            if (idx <= 0) {
+              rho0  = rho_arr[0];
+              pgas0 = P_arr[0];
+            } else if (idx >= N) {
+              rho0  = rho_arr[N-1];
+              pgas0 = P_arr[N-1];
+            } else {
+              double t = (rr - r_arr[idx-1]) / (r_arr[idx] - r_arr[idx-1]);
+              rho0  = rho_arr[idx-1] + t * (rho_arr[idx] - rho_arr[idx-1]);
+              pgas0 = P_arr[idx-1]   + t * (P_arr[idx]   - P_arr[idx-1]);
+            }
+          } else {
+            rho0  = d_amb;
+            pgas0 = p_amb;
+          }
+        }
+        phydro->u(IDN,k,j,i) = rho0;
+        phydro->u(IM1,k,j,i) = rho0*vx_amb;
+        phydro->u(IM2,k,j,i) = rho0*vy_amb;
+        phydro->u(IM3,k,j,i) = rho0*vz_amb;
         if (NON_BAROTROPIC_EOS) {
-          phydro->u(IEN,k,j,i) = p_amb/gm1
-                                 + 0.5*d_amb*(SQR(vx_amb)+SQR(vy_amb)+SQR(vz_amb));
+          // Use local (possibly stellar) gas pressure and density for internal + kinetic energy
+          phydro->u(IEN,k,j,i) = pgas0/gm1
+                                 + 0.5*rho0*(SQR(vx_amb)+SQR(vy_amb)+SQR(vz_amb));
         }
       }
     }

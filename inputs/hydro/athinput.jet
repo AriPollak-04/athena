@@ -7,9 +7,6 @@ configure = --prob=jet
 problem_id = jet      # problem ID: basename of output filenames
 
 
-<output1>
-file_type  = hst      # History data dump
-dt         = 0.1      # time increment between outputs
 
 <output2>
 file_type  = vtk      # Binary data dump
@@ -31,7 +28,7 @@ x1max      = 60.0     # maximum value of X1
 ix1_bc     = user     # inner-X1 boundary flag
 ox1_bc     = outflow  # outer-X1 boundary flag
 
-nx2        = 250      # Number of zones in X2-direction
+nx2        = 300      # Number of zones in X2-direction
 x2min      = -25.0    # minimum value of X2
 x2max      = 25.0     # maximum value of X2
 ix2_bc     = outflow  # inner-X2 boundary flag
@@ -53,8 +50,15 @@ vx = 0.0
 vy = 0.0
 vz = 0.0
 bx = 0.1
-by = 0.0
+by = 0.4
 bz = 0.0
+
+x1_0 = 0.0
+x2_0 = 0.0
+x3_0 = 0.0
+poly_csv_path = /Users/aripollak/athena/20polytrope_n3.00.csv
+rout = 20.0
+
 
 djet = 0.1
 pjet = 6.0e-3
