@@ -9,12 +9,12 @@ problem_id = jet_blast     # problem ID: basename of output filenames
 <output1>
 file_type  = hdf5        # Binary data dump
 variable   = prim       # variables to be output
-dt         = 0.02      # time increment between outputs
+dt         = 0.1      # time increment between outputs
 
 <time>
 cfl_number = 0.25        # The Courant, Friedrichs, & Lewy (CFL) Number
 nlim       = -1         # cycle limit 
-tlim       = 4       # time limit
+tlim       = 10       # time limit
 integrator  = vl2       # time integration algorithm
 xorder      = 2         # order of spatial reconstruction
 ncycle_out  = 10         # interval for stdout summary info
@@ -27,19 +27,19 @@ ix1_bc     = outflow    # inner-X1 boundary flag
 ox1_bc     = outflow    # outer-X1 boundary flag
 
 nx2        = 150           # Number of zones in X2-direction
-x2min      = -1  # minimum value of X2
-x2max      = 1  # maximum value of X2
+x2min= 0.0000000000000000e+00
+x2max= 3.1415926535897931e+00
 ix2_bc     = outflow        # inner-X2 boundary flag
 ox2_bc     = outflow      # outer-X2 boundary flag
 
 nx3        = 1           # Number of zones in X3-direction
-x3min      = -5 # minimum value of X3
-x3max      = 5 # maximum value of X3
+x3min     = 0.0000000000000000e+00
+x3max     =3.1415926535897931e+00
 ix3_bc     = outflow     # inner-X3 boundary flag
 ox3_bc     = outflow        # outer-X3 boundary flag
 
 refinement     = adaptive
-numlevel       = 3
+numlevel       = 2
 derefine_count    = 5
 
 adapt_interval = 10
@@ -67,7 +67,7 @@ cone_bipolar    = true
 # jet
 t_stop        = 1.50
 jet_rinj      = 0.1
-jet_Gam       = 20
+jet_Gam       = 80
 jet_rho       = 1e-5
 jet_p         = 1e-6
 phi0          = 0.0
