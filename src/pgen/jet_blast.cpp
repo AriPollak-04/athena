@@ -267,44 +267,16 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         // Default ambient velocities (will be overwritten inside BM shell)
         Real vx = 0.0, vy = 0.0, vz = 0.0;
 
-        Real theta_dir;
-        if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-          // polar angle θ = arccos((z - z0)/rad)
-          Real zloc = pcoord->x3v(k) - z0;
-          if (rad > 0.0) {
-            Real ct = zloc / rad;
-            if (ct > 1.0) ct = 1.0;
-            if (ct < -1.0) ct = -1.0;
-            theta_dir = std::acos(ct);
-          } else {
-            theta_dir = 0.0;
-          }
-        } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-          // in cylindrical axisym, x2v(j) is the azimuthal angle φ, so θ = atan2(|z|, r)
-          Real zloc = pcoord->x3v(k) - z0;
-          Real rloc = pcoord->x1v(i);
-          theta_dir = (rloc > 0.0 ? std::atan2(std::abs(zloc), rloc) : 0.0);
-        } else {  // spherical_polar
-          theta_dir = pcoord->x2v(j) - x2_0;
-        }
+        // Angles computed from Cartesian position relative to center (works in all coord systems)
+        Real zloc = z - z0;
+        Real ct_dir = (rad > 0.0) ? (zloc / rad) : 1.0; // cos(theta)
+        ct_dir = std::max((Real)-1.0, std::min((Real)1.0, ct_dir));
+        Real theta_dir = std::acos(ct_dir);
 
-        Real phi_dir;
-        if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-          // azimuthal angle φ = atan2(y - y0, x - x0)
-          // compute local x,y relative to blast center
-          Real xloc = pcoord->x1v(i) - x0;
-          Real yloc = pcoord->x2v(j) - y0;
-          phi_dir = std::atan2(yloc, xloc);
-          if (phi_dir < 0.0) phi_dir += 2.0*M_PI;
-        } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-          // φ coordinate in cylindrical, offset by x2_0
-            phi_dir = pcoord->x2v(j) - x2_0;
-            phi_dir = std::fmod(phi_dir + 2.0*M_PI, 2.0*M_PI);
-        } else {  // spherical_polar
-          // φ coordinate in spherical_polar, offset by x3_0
-          phi_dir = pcoord->x3v(k) - x3_0;
-          phi_dir = std::fmod(phi_dir + 2.0*M_PI, 2.0*M_PI);
-        }
+        Real xloc = x - x0;
+        Real yloc = y - y0;
+        Real phi_dir = std::atan2(yloc, xloc);
+        if (phi_dir < 0.0) phi_dir += 2.0*M_PI;
 
         // angle gating
         bool angle_ok = true;
@@ -571,27 +543,15 @@ void Mesh::UserWorkInLoop() {
             // Compute gate angles analogous to ProblemGenerator
             bool is2d = (pmb->ks == pmb->ke);
             bool angle_ok = true;
-            Real theta_dir, phi_dir;
-            if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-              // theta from +z
-              Real zloc = coord.x3v(k) - breakout_x3_0;
-              if (rad > 0.0) {
-                Real ct = zloc / rad; ct = std::max(-1.0, std::min(1.0, ct));
-                theta_dir = std::acos(ct);
-              } else { theta_dir = 0.0; }
-              // in-plane azimuth
-              Real xloc = coord.x1v(i) - breakout_x1_0;
-              Real yloc = coord.x2v(j) - breakout_x2_0;
-              phi_dir = std::atan2(yloc, xloc); if (phi_dir < 0.0) phi_dir += 2.0*M_PI;
-            } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-              Real zloc = coord.x3v(k) - breakout_x3_0;
-              Real rloc = coord.x1v(i);
-              theta_dir = (rloc > 0.0 ? std::atan2(std::abs(zloc), rloc) : 0.0);
-              phi_dir = coord.x2v(j) - breakout_x2_0; phi_dir = std::fmod(phi_dir + 2.0*M_PI, 2.0*M_PI);
-            } else { // spherical_polar
-              theta_dir = coord.x2v(j) - breakout_x2_0;
-              phi_dir   = coord.x3v(k) - breakout_x3_0; phi_dir = std::fmod(phi_dir + 2.0*M_PI, 2.0*M_PI);
-            }
+            // Angles from Cartesian position relative to breakout center (coordinate-agnostic)
+            Real zloc = z - breakout_x3_0;
+            Real ct_dir = (rad > 0.0) ? (zloc / rad) : 1.0; // cos(theta)
+            ct_dir = std::max((Real)-1.0, std::min((Real)1.0, ct_dir));
+            Real theta_dir = std::acos(ct_dir);
+            Real xloc = x - breakout_x1_0;
+            Real yloc = y - breakout_x2_0;
+            Real phi_dir = std::atan2(yloc, xloc);
+            if (phi_dir < 0.0) phi_dir += 2.0*M_PI;
 
             if (is2d && std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
               auto wrap_pm_pi = [](Real a)->Real { a = std::fmod(a + M_PI, 2.0*M_PI); if (a < 0.0) a += 2.0*M_PI; return a - M_PI; };
@@ -617,11 +577,11 @@ void Mesh::UserWorkInLoop() {
             }
             // Split velocity into radial and polar (theta) components while preserving |v|=beta
             Real invr = (rad>0.0) ? 1.0/rad : 0.0;
-            // Spherical angles relative to +z axis
-            Real ct = (rad>0.0) ? ((coord.x3v(k) - breakout_x3_0) / rad) : 1.0;
+            // Spherical angles from Cartesian position (works for cartesian/cylindrical/spherical)
+            Real ct = (rad>0.0) ? ((z - breakout_x3_0) / rad) : 1.0;  // cos(theta)
             ct = std::max(-1.0, std::min(1.0, ct));
             Real th = std::acos(ct);
-            Real ph = std::atan2(coord.x2v(j) - breakout_x2_0, coord.x1v(i) - breakout_x1_0);
+            Real ph = std::atan2(y - breakout_x2_0, x - breakout_x1_0);
             // Unit vectors in Cartesian for (e_r, e_theta). e_phi is not needed.
             Real sth = std::sin(th), cth = std::cos(th);
             Real cph = std::cos(ph),  sph = std::sin(ph);
