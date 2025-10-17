@@ -300,7 +300,27 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
             Real dphi2 = wrap_pm_pi(phi_dir - (phi0 + M_PI));
             angle_ok = (dphi2 >= dir_angle_min && dphi2 <= dir_angle_max);
           }
-        } else {
+        }
+        // In 2D Cylindrical (R,θ,z), also gate by in-plane azimuth using the same parameters
+        else if (is2d && std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+          Real phi0 = pin->GetOrAddReal("problem","phi0", 0.0);
+          bool cone_bipolar = pin->GetOrAddBoolean("problem","cone_bipolar", true);
+
+          auto wrap_pm_pi = [](Real a)->Real {
+            a = std::fmod(a + M_PI, 2.0*M_PI);
+            if (a < 0.0) a += 2.0*M_PI;
+            return a - M_PI;
+          };
+
+          Real dphi = wrap_pm_pi(phi_dir - phi0);
+          angle_ok = (dphi >= dir_angle_min && dphi <= dir_angle_max);
+
+          if (cone_bipolar && !angle_ok) {
+            Real dphi2 = wrap_pm_pi(phi_dir - (phi0 + M_PI));
+            angle_ok = (dphi2 >= dir_angle_min && dphi2 <= dir_angle_max);
+          }
+        }
+        else {
           // In 3D, keep θ gate relative to +z
           angle_ok = (theta_dir >= dir_angle_min && theta_dir <= dir_angle_max);
         }
@@ -563,7 +583,19 @@ void Mesh::UserWorkInLoop() {
                 angle_ok_bip = (dphi2 >= gate_dir_min && dphi2 <= gate_dir_max);
               }
               angle_ok = angle_ok_primary || angle_ok_bip;
-            } else {
+            }
+            else if (is2d && std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+              auto wrap_pm_pi = [](Real a)->Real { a = std::fmod(a + M_PI, 2.0*M_PI); if (a < 0.0) a += 2.0*M_PI; return a - M_PI; };
+              Real dphi  = wrap_pm_pi(phi_dir - gate_phi0);
+              bool angle_ok_primary = (dphi >= gate_dir_min && dphi <= gate_dir_max);
+              bool angle_ok_bip = false;
+              if (gate_cone_bipolar) {
+                Real dphi2 = wrap_pm_pi(phi_dir - (gate_phi0 + M_PI));
+                angle_ok_bip = (dphi2 >= gate_dir_min && dphi2 <= gate_dir_max);
+              }
+              angle_ok = angle_ok_primary || angle_ok_bip;
+            }
+            else {
               angle_ok = (theta_dir >= gate_dir_min && theta_dir <= gate_dir_max);
             }
 
