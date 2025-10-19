@@ -502,6 +502,20 @@ void Mesh::UserWorkInLoop() {
   const Real ringw  = (breakout_ringw > 0.0) ? breakout_ringw
                                              : (ringw_default > 0.0 ? ringw_default : 1e-2);
 
+  // Compute breakout center in Cartesian coordinates for coordinate-agnostic math
+  Real x0c, y0c, z0c;
+  if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+    x0c = breakout_x1_0; y0c = breakout_x2_0; z0c = breakout_x3_0;
+  } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+    Real R0 = breakout_x1_0, ph0 = breakout_x2_0, z0 = breakout_x3_0;
+    x0c = R0*std::cos(ph0); y0c = R0*std::sin(ph0); z0c = z0;
+  } else { // spherical_polar
+    Real r0 = breakout_x1_0, th0 = breakout_x2_0, ph0 = breakout_x3_0;
+    x0c = r0*std::sin(th0)*std::cos(ph0);
+    y0c = r0*std::sin(th0)*std::sin(ph0);
+    z0c = r0*std::cos(th0);
+  }
+
   // Static state across calls: per-bin breakout time and ambient reference
   static bool inited = false;
   static std::vector<Real> t_break;     // breakout time per bin (or <0 if unknown)
@@ -546,6 +560,11 @@ void Mesh::UserWorkInLoop() {
 
   // --- Jet driving: enforce jet state inside a small nozzle while time <= t_stop ---
   if (jet_enabled && (time <= jet_t_stop)) {
+    // ---- debug counters (per-step, local to this rank) ----
+    int dbg_in_rad = 0;        // cells with rad <= jet_rinj (geometric nozzle)
+    int dbg_angle_ok = 0;      // cells that also pass the angle/wedge gate
+    int dbg_written = 0;       // cells actually overwritten with jet state
+    // -------------------------------------------------------
     for (int nb=0; nb<nblocal; ++nb) {
       MeshBlock* pmb = my_blocks(nb);
       auto &coord = *pmb->pcoord;
@@ -554,22 +573,38 @@ void Mesh::UserWorkInLoop() {
       for (int k=pmb->ks; k<=pmb->ke; ++k) {
         for (int j=pmb->js; j<=pmb->je; ++j) {
           for (int i=pmb->is; i<=pmb->ie; ++i) {
-            // Cartesian position of cell center
+            // Cartesian position of cell center (independent of native mesh coordinates)
             Real x, y, z; cell_to_cart(pmb, k, j, i, x, y, z);
-            Real dx = x - breakout_x1_0, dy = y - breakout_x2_0, dz = z - breakout_x3_0;
+            Real dx = x - x0c, dy = y - y0c, dz = z - z0c;
+            bool is2d_local = (pmb->ks == pmb->ke);
+            // In 2D runs (single zone in x3), treat the nozzle radius as in-plane (ignore dz)
+            if (is2d_local) {
+              dz = 0.0;           // collapse the slab
+              z  = z0c;           // set to center for downstream angle calcs
+            }
             Real rad = std::sqrt(dx*dx + dy*dy + dz*dz);
-            if (rad > jet_rinj) continue; // nozzle region only
+            if (rad > jet_rinj) {
+              continue; // outside geometric nozzle
+            } else {
+              ++dbg_in_rad; // count geometric nozzle cells
+            }
 
             // Compute gate angles analogous to ProblemGenerator
-            bool is2d = (pmb->ks == pmb->ke);
+            bool is2d = is2d_local;
             bool angle_ok = true;
             // Angles from Cartesian position relative to breakout center (coordinate-agnostic)
-            Real zloc = z - breakout_x3_0;
-            Real ct_dir = (rad > 0.0) ? (zloc / rad) : 1.0; // cos(theta)
+            Real zloc = z - z0c;
+            Real ct_dir;
+            if (is2d) {
+              // In 2D slices, define theta_dir = π/2 so gating falls back to φ only (as intended)
+              ct_dir = 0.0;
+            } else {
+              ct_dir = (rad > 0.0) ? (zloc / rad) : 1.0; // cos(theta)
+            }
             ct_dir = std::max((Real)-1.0, std::min((Real)1.0, ct_dir));
             Real theta_dir = std::acos(ct_dir);
-            Real xloc = x - breakout_x1_0;
-            Real yloc = y - breakout_x2_0;
+            Real xloc = x - x0c;
+            Real yloc = y - y0c;
             Real phi_dir = std::atan2(yloc, xloc);
             if (phi_dir < 0.0) phi_dir += 2.0*M_PI;
 
@@ -599,7 +634,11 @@ void Mesh::UserWorkInLoop() {
               angle_ok = (theta_dir >= gate_dir_min && theta_dir <= gate_dir_max);
             }
 
-            if (!angle_ok) continue;
+            if (!angle_ok) {
+              continue;
+            } else {
+              ++dbg_angle_ok; // inside nozzle AND angle gate
+            }
 
             // Enforce jet state: density, pressure, and velocity (radial+tangential split)
             Real beta = 0.0;
@@ -610,10 +649,15 @@ void Mesh::UserWorkInLoop() {
             // Split velocity into radial and polar (theta) components while preserving |v|=beta
             Real invr = (rad>0.0) ? 1.0/rad : 0.0;
             // Spherical angles from Cartesian position (works for cartesian/cylindrical/spherical)
-            Real ct = (rad>0.0) ? ((z - breakout_x3_0) / rad) : 1.0;  // cos(theta)
+            Real ct;
+            if (is2d) {
+              ct = 0.0; // theta = π/2 in 2D slice
+            } else {
+              ct = (rad>0.0) ? ((z - z0c) / rad) : 1.0;  // cos(theta)
+            }
             ct = std::max(-1.0, std::min(1.0, ct));
             Real th = std::acos(ct);
-            Real ph = std::atan2(y - breakout_x2_0, x - breakout_x1_0);
+            Real ph = std::atan2(y - y0c, x - x0c);
             // Unit vectors in Cartesian for (e_r, e_theta). e_phi is not needed.
             Real sth = std::sin(th), cth = std::cos(th);
             Real cph = std::cos(ph),  sph = std::sin(ph);
@@ -630,35 +674,61 @@ void Mesh::UserWorkInLoop() {
             Real vy = v_rad*ery + v_theta*ety;
             Real vz = v_rad*erz + v_theta*etz;
 
+            // Map Cartesian (vx,vy,vz) to native mesh-basis velocity components (v1,v2,v3)
+            Real v1, v2c, v3;
+            if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+              v1 = vx;
+              v2c = vy;
+              v3 = vz;
+            } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+              // native basis is (v_R, v_phi, v_z); phi is the azimuth of this cell
+              // Use the same φ we computed above for position
+              Real vR   =  vx*std::cos(ph) + vy*std::sin(ph);
+              Real vphi = -vx*std::sin(ph) + vy*std::cos(ph);
+              v1 = vR; v2c = vphi; v3 = vz;
+            } else { // spherical_polar: native basis is (v_r, v_theta, v_phi)
+              // We already have orthonormal (e_r, e_theta, e_phi)
+              // e_phi = (-sinφ, cosφ, 0)
+              Real ephx = -sph, ephy =  cph, ephz = 0.0;
+              Real vr   = vx*erx + vy*ery + vz*erz;
+              Real vth  = vx*etx + vy*ety + vz*etz;
+              Real vph  = vx*ephx + vy*ephy + vz*ephz;
+              v1 = vr; v2c = vth; v3 = vph;
+            }
+
+            // Write primitives in native basis
             Real rho = std::max(jet_rho, (Real)1e-30);
             Real pgas = std::max(jet_p, (Real)1e-30);
             w(IDN,k,j,i) = rho;
             w(IPR,k,j,i) = pgas;
-            w(IVX,k,j,i) = vx;
-            w(IVY,k,j,i) = vy;
-            w(IVZ,k,j,i) = vz;
+            w(IVX,k,j,i) = v1;   // v^1
+            w(IVY,k,j,i) = v2c;  // v^2
+            w(IVZ,k,j,i) = v3;   // v^3
 
 #if defined(RELATIVISTIC_DYNAMICS) && (RELATIVISTIC_DYNAMICS != 0)
+            // Consistent conserved variables (still scalar v^2 from physical speed)
             Real v2 = vx*vx + vy*vy + vz*vz; v2 = std::min(v2, 1.0 - 1e-12);
             Real gL = 1.0/std::sqrt(1.0 - v2);
             Real gamma = pmb->peos->GetGamma();
             Real h_spec  = 1.0 + (gamma/(gamma - 1.0)) * (pgas / rho);
             u(IDN,k,j,i) = rho * gL;
-            u(IM1,k,j,i) = rho * h_spec * gL*gL * vx;
-            u(IM2,k,j,i) = rho * h_spec * gL*gL * vy;
-            u(IM3,k,j,i) = rho * h_spec * gL*gL * vz;
+            u(IM1,k,j,i) = rho * h_spec * gL*gL * v1;
+            u(IM2,k,j,i) = rho * h_spec * gL*gL * v2c;
+            u(IM3,k,j,i) = rho * h_spec * gL*gL * v3;
             Real tau  = rho * h_spec * gL*gL - pgas - rho * gL;
             Real Etot = tau + rho * gL; // include rest mass if requested
             u(IEN,k,j,i) = sr_energy_tau ? tau : Etot;
 #else
-            Real v2 = vx*vx + vy*vy + vz*vz;
+            Real v2mag = vx*vx + vy*vy + vz*vz;
             Real gm1 = pmb->peos->GetGamma() - 1.0;
             u(IDN,k,j,i) = rho;
-            u(IM1,k,j,i) = rho * vx;
-            u(IM2,k,j,i) = rho * vy;
-            u(IM3,k,j,i) = rho * vz;
-            u(IEN,k,j,i) = pgas/gm1 + 0.5*rho*v2;
+            u(IM1,k,j,i) = rho * v1;
+            u(IM2,k,j,i) = rho * v2c;
+            u(IM3,k,j,i) = rho * v3;
+            u(IEN,k,j,i) = pgas/gm1 + 0.5*rho*v2mag;
 #endif
+            // Count cells actually written with jet state this step
+            ++dbg_written;
           }
         }
       }
@@ -673,7 +743,7 @@ void Mesh::UserWorkInLoop() {
       for (int j=pmb->js; j<=pmb->je; ++j) {
         for (int i=pmb->is; i<=pmb->ie; ++i) {
           Real x, y, z; cell_to_cart(pmb, k, j, i, x, y, z);
-          Real dx = x - x1_0, dy = y - x2_0, dz = z - x3_0;
+          Real dx = x - x0c, dy = y - y0c, dz = z - z0c;
           Real rad = std::sqrt(dx*dx + dy*dy + dz*dz);
           if (rad <= rout || rad > rout + ringw) continue;  // only near the stellar surface
 
@@ -977,4 +1047,4 @@ int RefinementCondition(MeshBlock *pmb) {
   if (max_jump > threshold) return 1;
   if (max_jump < 0.25*threshold) return -1;
   return 0;
- }
+}
