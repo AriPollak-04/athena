@@ -382,7 +382,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         // catch obviously bad initial energies
         if (!std::isfinite(phydro->u(IEN,k,j,i)) || phydro->u(IEN,k,j,i) <= 0.0) {
           // keep a tiny positive energy to avoid inversion failure
-          phydro->u(IEN,k,j,i) = std::max(phydro->u(IEN,k,j,i), (Real)1e-30);
+          phydro->u(IEN,k,j,i) = std::max(phydro->u(IEN,k,j,i), (Real)1e-30); 
         }
         #else
         // Non-relativistic conserved variables
