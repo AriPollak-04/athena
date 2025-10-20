@@ -85,7 +85,6 @@ static Real gate_dir_max = M_PI;   // angle gate max (same as problem/dir_angle_
 static Real gate_phi0   = 0.0;     // center direction for 2D Cartesian wedge (radians)
 static bool gate_cone_bipolar = true; // also include opposite wedge
 static bool jet_enabled = false;   // enable jet driving when inputs provided
-static Real jet_vtheta_frac = 0.0; // fraction of beta assigned to v_θ inside opening angle
 static int sr_energy_tau = 1; // 1 = tau (exclude rest mass), 0 = Etot (include rest mass)
 // ----------------------------------------------------------
 
@@ -116,7 +115,6 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   gate_dir_max = pin->GetOrAddReal("problem", "dir_angle_max", M_PI);
   gate_phi0    = pin->GetOrAddReal("problem", "phi0", 0.0);
   gate_cone_bipolar = pin->GetOrAddBoolean("problem", "cone_bipolar", true);
-  jet_vtheta_frac = pin->GetOrAddReal("problem", "vtheta_frac", 0.0);
   // Enable jet only if a positive stop time and radius are provided
   jet_enabled = (jet_t_stop > 0.0) && (jet_rinj > 0.0) && (jet_Gam >= 1.0);
   // Optional: allow choosing SR energy convention for robustness/debugging
@@ -126,11 +124,11 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   if (Globals::my_rank == 0) {
     std::fprintf(stderr,
-      "[jet:init] enabled=%d t_stop=%g rinj=%g Gam=%g rho=%g p=%g gate=[%g,%g] phi0=%g bipolar=%d vtheta_frac=%g SR_E=%s\n",
+      "[jet:init] enabled=%d t_stop=%g rinj=%g Gam=%g rho=%g p=%g gate=[%g,%g] phi0=%g bipolar=%d SR_E=%s\n",
       (int)jet_enabled, (double)jet_t_stop, (double)jet_rinj, (double)jet_Gam,
       (double)jet_rho, (double)jet_p,
       (double)gate_dir_min, (double)gate_dir_max, (double)gate_phi0,
-      (int)gate_cone_bipolar, (double)jet_vtheta_frac, (sr_energy_tau?"tau":"etot"));
+      (int)gate_cone_bipolar, (sr_energy_tau?"tau":"etot"));
   }
   breakout_params_inited = true;
   return;
@@ -640,39 +638,30 @@ void Mesh::UserWorkInLoop() {
               ++dbg_angle_ok; // inside nozzle AND angle gate
             }
 
-            // Enforce jet state: density, pressure, and velocity (radial+tangential split)
+            // Enforce jet state: density, pressure, and velocity (purely radial)
             Real beta = 0.0;
             if (jet_Gam > 1.0) {
               Real invG2 = 1.0/(jet_Gam*jet_Gam);
               beta = std::sqrt(std::max(0.0, 1.0 - invG2));
             }
-            // Split velocity into radial and polar (theta) components while preserving |v|=beta
-            Real invr = (rad>0.0) ? 1.0/rad : 0.0;
-            // Spherical angles from Cartesian position (works for cartesian/cylindrical/spherical)
+            // Spherical angles from Cartesian position (works for all coordinate systems)
             Real ct;
             if (is2d) {
-              ct = 0.0; // theta = π/2 in 2D slice
+              ct = 0.0; // theta = π/2 in 2D slice → purely in-plane
             } else {
               ct = (rad>0.0) ? ((z - z0c) / rad) : 1.0;  // cos(theta)
             }
-            ct = std::max(-1.0, std::min(1.0, ct));
+            ct = std::max((Real)-1.0, std::min((Real)1.0, ct));
             Real th = std::acos(ct);
             Real ph = std::atan2(y - y0c, x - x0c);
-            // Unit vectors in Cartesian for (e_r, e_theta). e_phi is not needed.
+            // Unit vector e_r in Cartesian
             Real sth = std::sin(th), cth = std::cos(th);
             Real cph = std::cos(ph),  sph = std::sin(ph);
-            // e_r = (sinθ cosφ, sinθ sinφ, cosθ)
             Real erx = sth*cph, ery = sth*sph, erz = cth;
-            // e_theta = (cosθ cosφ, cosθ sinφ, -sinθ) points toward increasing θ
-            Real etx = cth*cph, ety = cth*sph, etz = -sth;
-            // choose tangential speed as a fraction of beta, cap to keep <= beta
-            Real v_theta = std::max((Real)0.0, std::min((Real)1.0, jet_vtheta_frac)) * beta;
-            if (v_theta > beta) v_theta = beta;
-            Real v_rad = std::sqrt(std::max((Real)0.0, beta*beta - v_theta*v_theta));
-            // Compose velocity vector in Cartesian
-            Real vx = v_rad*erx + v_theta*etx;
-            Real vy = v_rad*ery + v_theta*ety;
-            Real vz = v_rad*erz + v_theta*etz;
+            // Purely radial velocity in Cartesian
+            Real vx = beta * erx;
+            Real vy = beta * ery;
+            Real vz = beta * erz;
 
             // Map Cartesian (vx,vy,vz) to native mesh-basis velocity components (v1,v2,v3)
             Real v1, v2c, v3;
@@ -687,9 +676,12 @@ void Mesh::UserWorkInLoop() {
               Real vphi = -vx*std::sin(ph) + vy*std::cos(ph);
               v1 = vR; v2c = vphi; v3 = vz;
             } else { // spherical_polar: native basis is (v_r, v_theta, v_phi)
-              // We already have orthonormal (e_r, e_theta, e_phi)
-              // e_phi = (-sinφ, cosφ, 0)
-              Real ephx = -sph, ephy =  cph, ephz = 0.0;
+              // Orthonormal basis at (th, ph):
+              // e_r     = (sinθ cosφ, sinθ sinφ, cosθ)  == (erx, ery, erz)
+              // e_theta = (cosθ cosφ, cosθ sinφ, -sinθ)
+              // e_phi   = (-sinφ, cosφ, 0)
+              Real etx = cth*cph, ety = cth*sph, etz = -sth;
+              Real ephx = -sph,   ephy =  cph,   ephz = 0.0;
               Real vr   = vx*erx + vy*ery + vz*erz;
               Real vth  = vx*etx + vy*ety + vz*etz;
               Real vph  = vx*ephx + vy*ephy + vz*ephz;

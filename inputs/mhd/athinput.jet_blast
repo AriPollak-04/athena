@@ -14,7 +14,7 @@ dt         = 0.02      # time increment between outputs
 <time>
 cfl_number = 0.25        # The Courant, Friedrichs, & Lewy (CFL) Number
 nlim       = -1         # cycle limit 
-tlim       = 4      # time limit
+tlim       = 2.8      # time limit
 integrator  = vl2       # time integration algorithm
 xorder      = 2         # order of spatial reconstruction
 ncycle_out  = 10         # interval for stdout summary info
@@ -60,11 +60,11 @@ poly_csv_path = /Users/aripollak/athena/polytrope_n3.00.csv
 # Blast setup 
 cs_factor = 1e-6
 phi0            = 0.0
-dir_angle_min   = -0.3
-dir_angle_max   = 0.3
+dir_angle_min   = -0.2
+dir_angle_max   = 0.2
 cone_bipolar    = true
 t_stop        = 0.2
-jet_rinj      = 0.3
+jet_rinj      = 0.2
 jet_Gam       = 80
 jet_rho       = 1e-6
 jet_p         = 1e-6
