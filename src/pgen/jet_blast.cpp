@@ -85,7 +85,6 @@ static Real gate_dir_max = M_PI;   // angle gate max (same as problem/dir_angle_
 static Real gate_phi0   = 0.0;     // center direction for 2D Cartesian wedge (radians)
 static bool gate_cone_bipolar = true; // also include opposite wedge
 static bool jet_enabled = false;   // enable jet driving when inputs provided
-static int sr_energy_tau = 1; // 1 = tau (exclude rest mass), 0 = Etot (include rest mass)
 // ----------------------------------------------------------
 
 int RefinementCondition(MeshBlock *pmb);
@@ -117,18 +116,14 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   gate_cone_bipolar = pin->GetOrAddBoolean("problem", "cone_bipolar", true);
   // Enable jet only if a positive stop time and radius are provided
   jet_enabled = (jet_t_stop > 0.0) && (jet_rinj > 0.0) && (jet_Gam >= 1.0);
-  // Optional: allow choosing SR energy convention for robustness/debugging
-  // problem/sr_energy_convention = "tau" (default) or "etot"
-  std::string srE = pin->GetOrAddString("problem", "sr_energy_convention", "tau");
-  sr_energy_tau = (srE == "tau" || srE == "TAU") ? 1 : 0;
 
   if (Globals::my_rank == 0) {
     std::fprintf(stderr,
-      "[jet:init] enabled=%d t_stop=%g rinj=%g Gam=%g rho=%g p=%g gate=[%g,%g] phi0=%g bipolar=%d SR_E=%s\n",
+      "[jet:init] enabled=%d t_stop=%g rinj=%g Gam=%g rho=%g p=%g gate=[%g,%g] phi0=%g bipolar=%d\n",
       (int)jet_enabled, (double)jet_t_stop, (double)jet_rinj, (double)jet_Gam,
       (double)jet_rho, (double)jet_p,
       (double)gate_dir_min, (double)gate_dir_max, (double)gate_phi0,
-      (int)gate_cone_bipolar, (sr_energy_tau?"tau":"etot"));
+      (int)gate_cone_bipolar);
   }
   breakout_params_inited = true;
   return;
@@ -144,8 +139,6 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   Real poly_idx = pin->GetReal("problem", "poly_index");
   std::string poly_csv_path = pin->GetString("problem", "poly_csv_path");
   Real cs_factor = pin->GetReal("problem","cs_factor");
-  Real dir_angle_min    = pin->GetReal("problem","dir_angle_min");
-  Real dir_angle_max    = pin->GetReal("problem","dir_angle_max");
 
   // Compile-time detector for dynamics mode
 #if defined(RELATIVISTIC_DYNAMICS) && (RELATIVISTIC_DYNAMICS != 0)
@@ -165,10 +158,6 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   if (poly.r.empty()) {
     poly = LoadPolytropeCSV(poly_csv_path);
   }
-
-
-
-
 
   Real b0, angle;
   if (MAGNETIC_FIELDS_ENABLED) {
@@ -261,69 +250,9 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         }
 
 
-
-        // Default ambient velocities (will be overwritten inside BM shell)
+        // Initialize velocity components
         Real vx = 0.0, vy = 0.0, vz = 0.0;
-
-        // Angles computed from Cartesian position relative to center (works in all coord systems)
-        Real zloc = z - z0;
-        Real ct_dir = (rad > 0.0) ? (zloc / rad) : 1.0; // cos(theta)
-        ct_dir = std::max((Real)-1.0, std::min((Real)1.0, ct_dir));
-        Real theta_dir = std::acos(ct_dir);
-
-        Real xloc = x - x0;
-        Real yloc = y - y0;
-        Real phi_dir = std::atan2(yloc, xloc);
-        if (phi_dir < 0.0) phi_dir += 2.0*M_PI;
-
-        // angle gating
-        bool angle_ok = true;
-        bool is2d = (ks == ke);
-
-        // In 2D Cartesian, gate by in-plane azimuth φ around phi0 with width [dir_angle_min, dir_angle_max]
-        if (is2d && std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-          Real phi0 = pin->GetOrAddReal("problem","phi0", 0.0);                    // center direction (radians), default +x
-          bool cone_bipolar = pin->GetOrAddBoolean("problem","cone_bipolar", true); // also include opposite wedge by default
-
-          auto wrap_pm_pi = [](Real a)->Real {
-            a = std::fmod(a + M_PI, 2.0*M_PI);
-            if (a < 0.0) a += 2.0*M_PI;
-            return a - M_PI;
-          };
-
-          Real dphi = wrap_pm_pi(phi_dir - phi0);
-          angle_ok = (dphi >= dir_angle_min && dphi <= dir_angle_max);
-
-          if (cone_bipolar && !angle_ok) {
-            Real dphi2 = wrap_pm_pi(phi_dir - (phi0 + M_PI));
-            angle_ok = (dphi2 >= dir_angle_min && dphi2 <= dir_angle_max);
-          }
-        }
-        // In 2D Cylindrical (R,θ,z), also gate by in-plane azimuth using the same parameters
-        else if (is2d && std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-          Real phi0 = pin->GetOrAddReal("problem","phi0", 0.0);
-          bool cone_bipolar = pin->GetOrAddBoolean("problem","cone_bipolar", true);
-
-          auto wrap_pm_pi = [](Real a)->Real {
-            a = std::fmod(a + M_PI, 2.0*M_PI);
-            if (a < 0.0) a += 2.0*M_PI;
-            return a - M_PI;
-          };
-
-          Real dphi = wrap_pm_pi(phi_dir - phi0);
-          angle_ok = (dphi >= dir_angle_min && dphi <= dir_angle_max);
-
-          if (cone_bipolar && !angle_ok) {
-            Real dphi2 = wrap_pm_pi(phi_dir - (phi0 + M_PI));
-            angle_ok = (dphi2 >= dir_angle_min && dphi2 <= dir_angle_max);
-          }
-        }
-        else {
-          // In 3D, keep θ gate relative to +z
-          angle_ok = (theta_dir >= dir_angle_min && theta_dir <= dir_angle_max);
-        }
-
-        
+        // Get rid of Pressure
           pgas0 *= cs_factor;
           
         
@@ -368,13 +297,8 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         phydro->u(IM1,k,j,i) = momx;
         phydro->u(IM2,k,j,i) = momy;
         phydro->u(IM3,k,j,i) = momz;
-        if (sr_energy_tau) {
-          // store tau (exclude rest mass)
-          phydro->u(IEN,k,j,i) = Etot - D;
-        } else {
-          // store Etot (include rest mass)
-          phydro->u(IEN,k,j,i) = Etot;
-        }
+        // store Etot (include rest mass)
+        phydro->u(IEN,k,j,i) = Etot;
         // diagnostic: v^2 sanity
         if (!std::isfinite(v2)) nan_v2++;
         // catch obviously bad initial energies
@@ -689,7 +613,7 @@ void Mesh::UserWorkInLoop() {
             }
 
             // Write primitives in native basis
-            Real rho = std::max(jet_rho, (Real)1e-30);
+            Real rho = std::max(jet_rho, (Real)1e-30); //define a 1/r^2 rho profile? Define the density using luminosity and lorentz factor
             Real pgas = std::max(jet_p, (Real)1e-30);
             w(IDN,k,j,i) = rho;
             w(IPR,k,j,i) = pgas;
@@ -708,8 +632,8 @@ void Mesh::UserWorkInLoop() {
             u(IM2,k,j,i) = rho * h_spec * gL*gL * v2c;
             u(IM3,k,j,i) = rho * h_spec * gL*gL * v3;
             Real tau  = rho * h_spec * gL*gL - pgas - rho * gL;
-            Real Etot = tau + rho * gL; // include rest mass if requested
-            u(IEN,k,j,i) = sr_energy_tau ? tau : Etot;
+            Real Etot = tau + rho * gL; // store Etot (include rest mass)
+            u(IEN,k,j,i) = Etot;
 #else
             Real v2mag = vx*vx + vy*vy + vz*vz;
             Real gm1 = pmb->peos->GetGamma() - 1.0;
@@ -782,261 +706,119 @@ void Mesh::UserWorkInLoop() {
 }
 
 //========================================================================================
-//! \fn void Mesh::UserWorkAfterLoop(ParameterInput *pin)
-//! \brief Check radius of sphere to make sure it is round
+//! \fn int RefinementCondition(MeshBlock *pmb)
+//! \brief AMR refinement condition based on velocity shear
 //========================================================================================
-
-void Mesh::UserWorkAfterLoop(ParameterInput *pin) {
-  // delay AMR enrollment until after first timestep
-  static bool enrolled_amr = false;
-  if (adaptive && !enrolled_amr && time > 0.01) {
-    EnrollUserRefinementCondition(RefinementCondition);
-    enrolled_amr = true;
-  }
-  
-  if (!pin->GetOrAddBoolean("problem","compute_error",false)) return;
-  MeshBlock *pmb = my_blocks(0);
-
-  // analysis - check shape of the spherical blast wave
-  int is = pmb->is, ie = pmb->ie;
-  int js = pmb->js, je = pmb->je;
-  int ks = pmb->ks, ke = pmb->ke;
-  AthenaArray<Real> pr;
-  pr.InitWithShallowSlice(pmb->phydro->w, 4, IPR, 1);
-
-  // get coordinate location of the center, convert to Cartesian
-  Real x1_0 = pin->GetOrAddReal("problem", "x1_0", 0.0);
-  Real x2_0 = pin->GetOrAddReal("problem", "x2_0", 0.0);
-  Real x3_0 = pin->GetOrAddReal("problem", "x3_0", 0.0);
-  Real x0, y0, z0;
-  if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-    x0 = x1_0;
-    y0 = x2_0;
-    z0 = x3_0;
-  } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-    x0 = x1_0*std::cos(x2_0);
-    y0 = x1_0*std::sin(x2_0);
-    z0 = x3_0;
-  } else if (std::strcmp(COORDINATE_SYSTEM, "spherical_polar") == 0) {
-    x0 = x1_0*std::sin(x2_0)*std::cos(x3_0);
-    y0 = x1_0*std::sin(x2_0)*std::sin(x3_0);
-    z0 = x1_0*std::cos(x2_0);
-  } else {
-    // Only check legality of COORDINATE_SYSTEM once in this function
-    std::stringstream msg;
-    msg << "### FATAL ERROR in blast.cpp ParameterInput" << std::endl
-        << "Unrecognized COORDINATE_SYSTEM= " << COORDINATE_SYSTEM << std::endl;
-    ATHENA_ERROR(msg);
-  }
-
-  // find indices of the center
-  int ic, jc, kc;
-  for (ic=is; ic<=ie; ic++)
-    if (pmb->pcoord->x1f(ic) > x1_0) break;
-  ic--;
-  for (jc=pmb->js; jc<=pmb->je; jc++)
-    if (pmb->pcoord->x2f(jc) > x2_0) break;
-  jc--;
-  for (kc=pmb->ks; kc<=pmb->ke; kc++)
-    if (pmb->pcoord->x3f(kc) > x3_0) break;
-  kc--;
-
-  // search pressure maximum in each direction
-  Real rmax = 0.0, rmin = 100.0, rave = 0.0;
-  int nr = 0;
-  for (int o=0; o<=6; o++) {
-    int ios = 0, jos = 0, kos = 0;
-    if (o == 1) ios=-10;
-    else if (o == 2) ios =  10;
-    else if (o == 3) jos = -10;
-    else if (o == 4) jos =  10;
-    else if (o == 5) kos = -10;
-    else if (o == 6) kos =  10;
-    for (int d=0; d<6; d++) {
-      Real pmax = 0.0;
-      int imax(0), jmax(0), kmax(0);
-      if (d == 0) {
-        if (ios != 0) continue;
-        jmax = jc+jos, kmax = kc+kos;
-        for (int i=ic; i>=is; i--) {
-          if (pr(kmax,jmax,i)>pmax) {
-            pmax = pr(kmax,jmax,i);
-            imax = i;
-          }
-        }
-      } else if (d == 1) {
-        if (ios != 0) continue;
-        jmax = jc+jos, kmax = kc+kos;
-        for (int i=ic; i<=ie; i++) {
-          if (pr(kmax,jmax,i)>pmax) {
-            pmax = pr(kmax,jmax,i);
-            imax = i;
-          }
-        }
-      } else if (d == 2) {
-        if (jos != 0) continue;
-        imax = ic+ios, kmax = kc+kos;
-        for (int j=jc; j>=js; j--) {
-          if (pr(kmax,j,imax)>pmax) {
-            pmax = pr(kmax,j,imax);
-            jmax = j;
-          }
-        }
-      } else if (d == 3) {
-        if (jos != 0) continue;
-        imax = ic+ios, kmax = kc+kos;
-        for (int j=jc; j<=je; j++) {
-          if (pr(kmax,j,imax)>pmax) {
-            pmax = pr(kmax,j,imax);
-            jmax = j;
-          }
-        }
-      } else if (d == 4) {
-        if (kos != 0) continue;
-        imax = ic+ios, jmax = jc+jos;
-        for (int k=kc; k>=ks; k--) {
-          if (pr(k,jmax,imax)>pmax) {
-            pmax = pr(k,jmax,imax);
-            kmax = k;
-          }
-        }
-      } else { // if (d == 5) {
-        if (kos != 0) continue;
-        imax = ic+ios, jmax = jc+jos;
-        for (int k=kc; k<=ke; k++) {
-          if (pr(k,jmax,imax)>pmax) {
-            pmax = pr(k,jmax,imax);
-            kmax = k;
-          }
-        }
-      }
-
-      Real xm, ym, zm;
-      Real x1m = pmb->pcoord->x1v(imax);
-      Real x2m = pmb->pcoord->x2v(jmax);
-      Real x3m = pmb->pcoord->x3v(kmax);
-      if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-        xm = x1m;
-        ym = x2m;
-        zm = x3m;
-      } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-        xm = x1m*std::cos(x2m);
-        ym = x1m*std::sin(x2m);
-        zm = x3m;
-      } else {  // if (std::strcmp(COORDINATE_SYSTEM, "spherical_polar") == 0) {
-        xm = x1m*std::sin(x2m)*std::cos(x3m);
-        ym = x1m*std::sin(x2m)*std::sin(x3m);
-        zm = x1m*std::cos(x2m);
-      }
-      Real rad = std::sqrt(SQR(xm-x0)+SQR(ym-y0)+SQR(zm-z0));
-      if (rad > rmax) rmax = rad;
-      if (rad < rmin) rmin = rad;
-      rave += rad;
-      nr++;
-    }
-  }
-  rave /= static_cast<Real>(nr);
-
-  // use physical grid spacing at center of blast
-  Real dr_max;
-  Real  x1c = pmb->pcoord->x1v(ic);
-  Real dx1c = pmb->pcoord->dx1f(ic);
-  Real  x2c = pmb->pcoord->x2v(jc);
-  Real dx2c = pmb->pcoord->dx2f(jc);
-  Real dx3c = pmb->pcoord->dx3f(kc);
-  if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-    dr_max = std::max(std::max(dx1c, dx2c), dx3c);
-  } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-    dr_max = std::max(std::max(dx1c, x1c*dx2c), dx3c);
-  } else { // if (std::strcmp(COORDINATE_SYSTEM, "spherical_polar") == 0) {
-    dr_max = std::max(std::max(dx1c, x1c*dx2c), x1c*std::sin(x2c)*dx3c);
-  }
-  Real deform=(rmax-rmin)/dr_max;
-
-  // only the root process outputs the data
-  if (Globals::my_rank == 0) {
-    std::string fname;
-    fname.assign("blastwave-shape.dat");
-    std::stringstream msg;
-    FILE *pfile;
-
-    // The file exists -- reopen the file in append mode
-    if ((pfile = std::fopen(fname.c_str(),"r")) != nullptr) {
-      if ((pfile = std::freopen(fname.c_str(),"a",pfile)) == nullptr) {
-        msg << "### FATAL ERROR in function [Mesh::UserWorkAfterLoop]"
-            << std::endl << "Blast shape output file could not be opened" <<std::endl;
-        ATHENA_ERROR(msg);
-      }
-
-      // The file does not exist -- open the file in write mode and add headers
-    } else {
-      if ((pfile = std::fopen(fname.c_str(),"w")) == nullptr) {
-        msg << "### FATAL ERROR in function [Mesh::UserWorkAfterLoop]"
-            << std::endl << "Blast shape output file could not be opened" <<std::endl;
-        ATHENA_ERROR(msg);
-      }
-    }
-    std::fprintf(pfile,"# Offset blast wave test in %s coordinates:\n",COORDINATE_SYSTEM);
-    std::fprintf(pfile,"# Rmax       Rmin       Rave        Deformation\n");
-    std::fprintf(pfile,"%e  %e  %e  %e \n",rmax,rmin,rave,deform);
-    std::fclose(pfile);
-  }
-  return;
-}
 
 
 // refinement condition: check the maximum pressure gradient
 int RefinementCondition(MeshBlock *pmb) {
   AthenaArray<Real> &w = pmb->phydro->w;
-  // compute block center
-  auto &coord = *pmb->pcoord;
+  Coordinates &coord = *pmb->pcoord;
+
+  // Optional radial cap (kept from existing code)
   Real rcen = coord.x1v(pmb->is) + coord.x1v(pmb->ie);
   rcen *= 0.5;
   if (rcen > 4.0) return 0;   // no AMR out beyond 4.0R
 
-    auto velocity_jump = [&](int kk, int jj, int ii,
-                           int kn, int jn, int in) -> Real {
-    Real dvx = w(IVX, kk, jj, ii) - w(IVX, kn, jn, in);
-    Real dvy = w(IVY, kk, jj, ii) - w(IVY, kn, jn, in);
-    Real dvz = 0.0;
-    if (pmb->pmy_mesh->f3 || pmb->block_size.nx3 > 1) {
-      dvz = w(IVZ, kk, jj, ii) - w(IVZ, kn, jn, in);
-    }
-    return std::sqrt(dvx*dvx + dvy*dvy + dvz*dvz);
+  // Dimensionality flags
+  bool has_y = (pmb->block_size.nx2 > 1) || pmb->pmy_mesh->f2;
+  bool has_z = (pmb->block_size.nx3 > 1) || pmb->pmy_mesh->f3;
+
+  // Floors for safe normalization
+  const Real pfloor  = (Real)1e-20;
+  const Real rhofloor= (Real)1e-30;
+  const Real tiny    = (Real)1e-99;
+
+  // Coordinate-aware spacing helpers (cell-centered, handles edges)
+  auto dx1_at = [&](int i)->Real {
+    if (i == pmb->is) return coord.x1v(i+1) - coord.x1v(i);
+    if (i == pmb->ie) return coord.x1v(i)   - coord.x1v(i-1);
+    Real hp = coord.x1v(i+1) - coord.x1v(i);
+    Real hm = coord.x1v(i)   - coord.x1v(i-1);
+    return (Real)0.5*(hp + hm);
   };
-  Real max_jump = 0.0;
-  if (pmb->pmy_mesh->f3) {
-    for (int k = pmb->ks; k <= pmb->ke; ++k) {
-      for (int j = pmb->js; j <= pmb->je; ++j) {
-        for (int i = pmb->is; i <= pmb->ie; ++i) {
-          Real local_jump = 0.0;
-          local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j, i-1));
-          local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j, i+1));
-          local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j-1, i));
-          local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j+1, i));
-          local_jump = std::max(local_jump, velocity_jump(k, j, i, k-1, j, i));
-          local_jump = std::max(local_jump, velocity_jump(k, j, i, k+1, j, i));
-          max_jump = std::max(max_jump, local_jump);
-        }
-      }
-    }
-  } else if (pmb->pmy_mesh->f2) {
-    int k = pmb->ks;
+  auto dx2_at = [&](int j)->Real {
+    if (!has_y) return dx1_at(pmb->is); // unused, but return something finite
+    if (j == pmb->js) return coord.x2v(j+1) - coord.x2v(j);
+    if (j == pmb->je) return coord.x2v(j)   - coord.x2v(j-1);
+    Real hp = coord.x2v(j+1) - coord.x2v(j);
+    Real hm = coord.x2v(j)   - coord.x2v(j-1);
+    return (Real)0.5*(hp + hm);
+  };
+  auto dx3_at = [&](int k)->Real {
+    if (!has_z) return dx1_at(pmb->is);
+    if (k == pmb->ks) return coord.x3v(k+1) - coord.x3v(k);
+    if (k == pmb->ke) return coord.x3v(k)   - coord.x3v(k-1);
+    Real hp = coord.x3v(k+1) - coord.x3v(k);
+    Real hm = coord.x3v(k)   - coord.x3v(k-1);
+    return (Real)0.5*(hp + hm);
+  };
+
+  // One-sided at edges, centered otherwise
+  auto dA_dx1 = [&](int k,int j,int i,int comp)->Real {
+    if (i == pmb->is)
+      return (w(comp,k,j,i+1) - w(comp,k,j,i)) / (coord.x1v(i+1) - coord.x1v(i) + tiny);
+    if (i == pmb->ie)
+      return (w(comp,k,j,i)   - w(comp,k,j,i-1)) / (coord.x1v(i)   - coord.x1v(i-1) + tiny);
+    return (w(comp,k,j,i+1) - w(comp,k,j,i-1)) / (coord.x1v(i+1) - coord.x1v(i-1) + tiny);
+  };
+  auto dA_dx2 = [&](int k,int j,int i,int comp)->Real {
+    if (!has_y) return 0.0;
+    if (j == pmb->js)
+      return (w(comp,k,j+1,i) - w(comp,k,j,i)) / (coord.x2v(j+1) - coord.x2v(j) + tiny);
+    if (j == pmb->je)
+      return (w(comp,k,j,i)   - w(comp,k,j-1,i)) / (coord.x2v(j)   - coord.x2v(j-1) + tiny);
+    return (w(comp,k,j+1,i) - w(comp,k,j-1,i)) / (coord.x2v(j+1) - coord.x2v(j-1) + tiny);
+  };
+  auto dA_dx3 = [&](int k,int j,int i,int comp)->Real {
+    if (!has_z) return 0.0;
+    if (k == pmb->ks)
+      return (w(comp,k+1,j,i) - w(comp,k,j,i)) / (coord.x3v(k+1) - coord.x3v(k) + tiny);
+    if (k == pmb->ke)
+      return (w(comp,k,j,i)   - w(comp,k-1,j,i)) / (coord.x3v(k)   - coord.x3v(k-1) + tiny);
+    return (w(comp,k+1,j,i) - w(comp,k-1,j,i)) / (coord.x3v(k+1) - coord.x3v(k-1) + tiny);
+  };
+
+  Real max_eta = 0.0; // composite indicator across the block
+
+  for (int k = pmb->ks; k <= pmb->ke; ++k) {
     for (int j = pmb->js; j <= pmb->je; ++j) {
       for (int i = pmb->is; i <= pmb->ie; ++i) {
-        Real local_jump = 0.0;
-        local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j, i-1));
-        local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j, i+1));
-        local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j-1, i));
-        local_jump = std::max(local_jump, velocity_jump(k, j, i, k, j+1, i));
-        max_jump = std::max(max_jump, local_jump);
+        // Local cell size for normalization (level-independent)
+        Real dx1 = dx1_at(i);
+        Real dx2 = has_y ? dx2_at(j) : dx1;
+        Real dx3 = has_z ? dx3_at(k) : dx1;
+        Real dmin = std::min(dx1, std::min(dx2, dx3));
+
+        // Gradients
+        Real gpx = dA_dx1(k,j,i, IPR);
+        Real gpy = dA_dx2(k,j,i, IPR);
+        Real gpz = dA_dx3(k,j,i, IPR);
+        Real grx = dA_dx1(k,j,i, IDN);
+        Real gry = dA_dx2(k,j,i, IDN);
+        Real grz = dA_dx3(k,j,i, IDN);
+
+        Real gp = std::sqrt(gpx*gpx + gpy*gpy + gpz*gpz);
+        Real gr = std::sqrt(grx*grx + gry*gry + grz*grz);
+
+        // Dimensionless indicators
+        Real p   = std::max(w(IPR,k,j,i), pfloor);
+        Real rho = std::max(w(IDN,k,j,i), rhofloor);
+        Real eta_p = gp * dmin / p;
+        Real eta_r = gr * dmin / rho;
+
+        Real eta = std::max(eta_p, eta_r); // shocks + contacts
+        if (eta > max_eta) max_eta = eta;
       }
     }
-  } else {
-    return 0;
   }
 
-  if (max_jump > threshold) return 1;
-  if (max_jump < 0.25*threshold) return -1;
-  return 0;
+  // Hysteresis using existing 'threshold' input as tau_ref
+  Real tau_ref   = threshold;
+  Real tau_deref = (Real)0.25 * threshold; // prevent thrashing
+
+  if (max_eta > tau_ref)   return 1;   // refine
+  if (max_eta < tau_deref) return -1;  // derefine
+  return 0;                            // keep
 }

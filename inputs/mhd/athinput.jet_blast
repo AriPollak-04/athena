@@ -4,7 +4,7 @@ reference = Gardiner. T.A. & Stone, J.M., JCP, 205, 509 (2005) (for MHD version 
 configure = --prob=jet_blast --coord=cylindrical -hdf5 --hdf5_path="$CONDA_PREFIX" -s
 
 <job>
-problem_id = jet_blast     # problem ID: basename of output filenames
+problem_id = jet_blast    # problem ID: basename of output filenames
 
 <output1>
 file_type  = hdf5        # Binary data dump
@@ -14,21 +14,21 @@ dt         = 0.02      # time increment between outputs
 <time>
 cfl_number = 0.25        # The Courant, Friedrichs, & Lewy (CFL) Number
 nlim       = -1         # cycle limit 
-tlim       = 2.8      # time limit
+tlim       = 4      # time limit
 integrator  = vl2       # time integration algorithm
 xorder      = 2         # order of spatial reconstruction
 ncycle_out  = 10         # interval for stdout summary info
 
 <mesh>
-nx1        = 150       # Number of zones in X1-direction
-x1min      = 1e-5       # minimum value of X1
+nx1        = 300      # Number of zones in X1-direction
+x1min      = -1.2      # minimum value of X1
 x1max      = 1.2    # maximum value of X1
 ix1_bc     = outflow    # inner-X1 boundary flag
 ox1_bc     = outflow    # outer-X1 boundary flag
 
-nx2        = 150          # Number of zones in X2-direction
-x2min=  0.0000000000000000e+00
-x2max=  6.283185307179586
+nx2        = 300          # Number of zones in X2-direction
+x2min       = -1.2     #0.0000000000000000e+00
+x2max       = 1.2      #6.283185307179586
 ix2_bc     = periodic        # inner-X2 boundary flag
 ox2_bc     = periodic     # outer-X2 boundary flag
 
@@ -38,9 +38,9 @@ x3max  = 1.0
 ix3_bc     = outflow    # inner-X3 boundary flag
 ox3_bc     = outflow       # outer-X3 boundary flag
 
-#refinement     = adaptive
-#numlevel       = 2
-#derefine_count    = 5
+refinement     = adaptive
+numlevel       = 3
+derefine_count    = 4
 
 adapt_interval = 10
 
@@ -59,17 +59,16 @@ poly_csv_path = /Users/aripollak/athena/polytrope_n3.00.csv
 
 # Blast setup 
 cs_factor = 1e-6
-phi0            = 0.0
-dir_angle_min   = -0.2
-dir_angle_max   = 0.2
+phi0            = 0
+dir_angle_min   = -0.3
+dir_angle_max   = 0.3
 cone_bipolar    = true
-t_stop        = 0.2
-jet_rinj      = 0.2
+t_stop        = 0.3
+jet_rinj      = 0.1
 jet_Gam       = 80
 jet_rho       = 1e-6
 jet_p         = 1e-6
 vtheta_frac   = 0.2
-sr_energy_convention = etot  
 
 
 
@@ -79,7 +78,7 @@ x2_0 = 0.0
 x3_0 = 0.0
 
 # Misc
-thr            = 0.01
+  thr = 0.15   # good starting point (refine)
 
 #For physical blast
 
