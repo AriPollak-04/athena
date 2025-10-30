@@ -62,7 +62,11 @@ static PolytropeData LoadPolytropeCSV(const std::string &filename) {
 #include "../globals.hpp"
 #include "../hydro/hydro.hpp"
 #include "../mesh/mesh.hpp"
+
 #include "../parameter_input.hpp"
+
+// Forward decl for AMR callback used in InitUserMeshData
+int RefinementCondition(MeshBlock *pmb);
 
 Real threshold;
 
@@ -87,7 +91,77 @@ static bool gate_cone_bipolar = true; // also include opposite wedge
 static bool jet_enabled = false;   // enable jet driving when inputs provided
 // ----------------------------------------------------------
 
-int RefinementCondition(MeshBlock *pmb);
+
+  
+// ---- User history outputs: global integrals ----
+static Real Hst_Etot(MeshBlock *pmb, int iout) {
+  Coordinates *pco = pmb->pcoord;
+  AthenaArray<Real> &u = pmb->phydro->u;
+  Real sum = 0.0;
+  for (int k = pmb->ks; k <= pmb->ke; ++k)
+    for (int j = pmb->js; j <= pmb->je; ++j)
+      for (int i = pmb->is; i <= pmb->ie; ++i)
+        sum += u(IEN,k,j,i) * pco->GetCellVolume(k,j,i); // Etot density * dV
+  return sum;
+}
+
+static Real Hst_Eexcess(MeshBlock *pmb, int iout) {
+  Coordinates *pco = pmb->pcoord;
+  AthenaArray<Real> &u = pmb->phydro->u;
+  Real sum = 0.0;
+  for (int k = pmb->ks; k <= pmb->ke; ++k)
+    for (int j = pmb->js; j <= pmb->je; ++j)
+      for (int i = pmb->is; i <= pmb->ie; ++i)
+        sum += (u(IEN,k,j,i) - u(IDN,k,j,i)) * pco->GetCellVolume(k,j,i); // Etot - D = tau
+  return sum;
+}
+
+static Real Hst_Px(MeshBlock *pmb, int iout) {
+  Coordinates *pco = pmb->pcoord;
+  AthenaArray<Real> &u = pmb->phydro->u;
+  Real sum = 0.0;
+  for (int k = pmb->ks; k <= pmb->ke; ++k)
+    for (int j = pmb->js; j <= pmb->je; ++j)
+      for (int i = pmb->is; i <= pmb->ie; ++i)
+        sum += u(IM1,k,j,i) * pco->GetCellVolume(k,j,i);
+  return sum;
+}
+
+static Real Hst_Py(MeshBlock *pmb, int iout) {
+  Coordinates *pco = pmb->pcoord;
+  AthenaArray<Real> &u = pmb->phydro->u;
+  Real sum = 0.0;
+  for (int k = pmb->ks; k <= pmb->ke; ++k)
+    for (int j = pmb->js; j <= pmb->je; ++j)
+      for (int i = pmb->is; i <= pmb->ie; ++i)
+        sum += u(IM2,k,j,i) * pco->GetCellVolume(k,j,i);
+  return sum;
+}
+
+static Real Hst_Pz(MeshBlock *pmb, int iout) {
+  Coordinates *pco = pmb->pcoord;
+  AthenaArray<Real> &u = pmb->phydro->u;
+  Real sum = 0.0;
+  for (int k = pmb->ks; k <= pmb->ke; ++k)
+    for (int j = pmb->js; j <= pmb->je; ++j)
+      for (int i = pmb->is; i <= pmb->ie; ++i)
+        sum += u(IM3,k,j,i) * pco->GetCellVolume(k,j,i);
+  return sum;
+}
+
+static Real Hst_PgasInt(MeshBlock *pmb, int iout) {
+  Coordinates *pco = pmb->pcoord;
+  AthenaArray<Real> &w = pmb->phydro->w;
+  Real sum = 0.0;
+  for (int k = pmb->ks; k <= pmb->ke; ++k)
+    for (int j = pmb->js; j <= pmb->je; ++j)
+      for (int i = pmb->is; i <= pmb->ie; ++i)
+        sum += w(IPR,k,j,i) * pco->GetCellVolume(k,j,i); // ∫ p_gas dV
+  return sum;
+}
+
+
+
 
 void Mesh::InitUserMeshData(ParameterInput *pin) {
   if (adaptive) {
@@ -116,6 +190,15 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   gate_cone_bipolar = pin->GetOrAddBoolean("problem", "cone_bipolar", true);
   // Enable jet only if a positive stop time and radius are provided
   jet_enabled = (jet_t_stop > 0.0) && (jet_rinj > 0.0) && (jet_Gam >= 1.0);
+
+  // Register global integrals in history output (allocate N slots, then enroll by index)
+  AllocateUserHistoryOutput(6);
+  EnrollUserHistoryOutput(0, Hst_Etot,    "E_tot");
+  EnrollUserHistoryOutput(1, Hst_Eexcess, "E_excess"); // Etot - D (tau)
+  EnrollUserHistoryOutput(2, Hst_Px,      "Px_tot");
+  EnrollUserHistoryOutput(3, Hst_Py,      "Py_tot");
+  EnrollUserHistoryOutput(4, Hst_Pz,      "Pz_tot");
+  EnrollUserHistoryOutput(5, Hst_PgasInt, "Pgas_int");
 
   if (Globals::my_rank == 0) {
     std::fprintf(stderr,
@@ -816,7 +899,7 @@ int RefinementCondition(MeshBlock *pmb) {
 
   // Hysteresis using existing 'threshold' input as tau_ref
   Real tau_ref   = threshold;
-  Real tau_deref = (Real)0.25 * threshold; // prevent thrashing
+  Real tau_deref = (Real)0.7 * threshold; // prevent thrashing
 
   if (max_eta > tau_ref)   return 1;   // refine
   if (max_eta < tau_deref) return -1;  // derefine

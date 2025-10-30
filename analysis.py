@@ -5,6 +5,42 @@ import h5py
 import pandas as pd
 import astropy.constants as c
 
+
+#%% lets look at the total energy and momentum conservation from the history file
+hst_file = '/Users/aripollak/work/jet_blast.hst'
+hst_data = pd.read_csv(hst_file, delim_whitespace=True, comment='#', header=None)
+hst_data.columns = ['time', 'dt', 'mass', 'mom1', 'mom2', 'mom3',
+                    'KE1', 'KE2', 'KE3', 'totE', 'Etot', 'Eexcess', 'Px_tot', 'Py_tot', 'Pz_tot', 'Pgas']
+
+
+P_total = np.sqrt(hst_data['Px_tot']**2 + hst_data['Py_tot']**2 + hst_data['Pz_tot']**2)
+
+
+v_eff = P_total / (hst_data['Etot'] + hst_data['Pgas'])
+
+# Plot total energy conservation
+plt.figure(figsize=(10, 6), dpi=300)
+plt.plot(hst_data['time'], hst_data['Etot'], label='Total Energy', color='blue')
+# plt.plot(hst_data['time'], hst_data['totE'], label='Total Energy (totE)', 
+#          color='green', linestyle='--') 
+plt.plot(hst_data['time'], P_total, label='Total Momentum', color='red')
+plt.xlabel('Time')
+plt.ylabel('Energy')
+plt.title('Total Energy Conservation')
+plt.grid(True)
+plt.legend()
+
+
+plt.figure(figsize=(10, 6), dpi=300)
+plt.plot(hst_data['time'], v_eff, label='Effective Velocity (mom/ (E+Pgas))', color='purple')
+plt.xlabel('Time')
+plt.ylabel('Effective Velocity')
+plt.title('Effective Velocity Conservation')
+plt.grid(True)
+plt.legend()
+
+#%%
+
 # Load the csv file
 data = pd.read_csv('/Users/aripollak/work/shock_breakout.csv')
 data.set_index('angle_deg', inplace=True)

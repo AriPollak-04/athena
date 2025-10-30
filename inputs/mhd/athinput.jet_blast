@@ -11,24 +11,28 @@ file_type  = hdf5        # Binary data dump
 variable   = prim       # variables to be output
 dt         = 0.02      # time increment between outputs
 
+<output2>
+file_type  = hst
+dt         = 0.02
+
 <time>
 cfl_number = 0.25        # The Courant, Friedrichs, & Lewy (CFL) Number
 nlim       = -1         # cycle limit 
-tlim       = 4      # time limit
+tlim       = 8      # time limit
 integrator  = vl2       # time integration algorithm
 xorder      = 2         # order of spatial reconstruction
 ncycle_out  = 10         # interval for stdout summary info
 
 <mesh>
-nx1        = 300      # Number of zones in X1-direction
-x1min      = -1.2      # minimum value of X1
-x1max      = 1.2    # maximum value of X1
+nx1        = 150      # Number of zones in X1-direction
+x1min      = 1e-6      # minimum value of X1
+x1max      = 2    # maximum value of X1
 ix1_bc     = outflow    # inner-X1 boundary flag
 ox1_bc     = outflow    # outer-X1 boundary flag
 
-nx2        = 300          # Number of zones in X2-direction
-x2min       = -1.2     #0.0000000000000000e+00
-x2max       = 1.2      #6.283185307179586
+nx2        = 150         # Number of zones in X2-direction
+x2min       = 0.0000000000000000e+00
+x2max       = 6.283185307179586
 ix2_bc     = periodic        # inner-X2 boundary flag
 ox2_bc     = periodic     # outer-X2 boundary flag
 
@@ -39,7 +43,7 @@ ix3_bc     = outflow    # inner-X3 boundary flag
 ox3_bc     = outflow       # outer-X3 boundary flag
 
 refinement     = adaptive
-numlevel       = 3
+numlevel       = 2
 derefine_count    = 4
 
 adapt_interval = 10
