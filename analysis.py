@@ -17,6 +17,7 @@ P_total = np.sqrt(hst_data['Px_tot']**2 + hst_data['Py_tot']**2 + hst_data['Pz_t
 
 
 v_eff = P_total / (hst_data['Etot'] + hst_data['Pgas'])
+#%%
 
 # Plot total energy conservation
 plt.figure(figsize=(10, 6), dpi=300)
@@ -32,7 +33,7 @@ plt.legend()
 
 
 plt.figure(figsize=(10, 6), dpi=300)
-plt.plot(hst_data['time'], v_eff, label='Effective Velocity (mom/ (E+Pgas))', color='purple')
+plt.scatter(hst_data['time'], v_eff, label='Effective Velocity (mom/ (E-Pgas))', color='purple')
 plt.xlabel('Time')
 plt.ylabel('Effective Velocity')
 plt.title('Effective Velocity Conservation')
@@ -48,7 +49,7 @@ data.set_index('angle_deg', inplace=True)
 #%%
 #Quick plot
 plt.figure(figsize=(10, 6))
-plt.plot(data.index, data['breakout_time'], marker='o', label='Shock Speed', color = 'black')
+plt.plot(data.index, data['breakout_time'], marker='o', color = 'black')
 plt.xlabel('Angle (degrees)')
 plt.ylabel('Breakout Time')
 plt.title('Shock Breakout Time vs Angle')

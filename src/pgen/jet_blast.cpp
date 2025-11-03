@@ -3,10 +3,10 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-//! \file blast.cpp
-//! \brief Problem generator for spherical blast wave problem.  Works in Cartesian,
-//!        cylindrical, and spherical coordinates.  Contains post-processing code
-//!        to check whether blast is spherical for regression tests
+//! \file jet_blast.cpp
+//! \brief Problem generator for a jet blast wave inside a star.  Works in Cartesian,
+//!        cylindrical, and spherical coordinates.  Contains both non-relativistic and relativistic
+//!        implementations. 
 //!
 //! REFERENCE: P. Londrillo & L. Del Zanna, "High-order upwind schemes for
 //!   multidimensional MHD", ApJ, 530, 508 (2000), and references therein.
@@ -65,7 +65,7 @@ static PolytropeData LoadPolytropeCSV(const std::string &filename) {
 
 #include "../parameter_input.hpp"
 
-// Forward decl for AMR callback used in InitUserMeshData
+
 int RefinementCondition(MeshBlock *pmb);
 
 Real threshold;
@@ -156,7 +156,7 @@ static Real Hst_PgasInt(MeshBlock *pmb, int iout) {
   for (int k = pmb->ks; k <= pmb->ke; ++k)
     for (int j = pmb->js; j <= pmb->je; ++j)
       for (int i = pmb->is; i <= pmb->ie; ++i)
-        sum += w(IPR,k,j,i) * pco->GetCellVolume(k,j,i); // ∫ p_gas dV
+        sum += w(IPR,k,j,i) * pco->GetCellVolume(k,j,i); //  p_gas*dV
   return sum;
 }
 
@@ -301,11 +301,13 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           z = pcoord->x1v(i)*std::cos(pcoord->x2v(j));
           rad = std::sqrt(SQR(x - x0) + SQR(y - y0) + SQR(z - z0));
         }
-        // compute local azimuthal angle
+
         Real rr     = rad;
         Real r_star = rout;
         Real rho, pgas;
-        // Interpolate from precomputed polytrope CSV
+
+
+        // Use precomputed Polytropic structure
         Real rho0, pgas0;
         {
           const auto &r_arr   = poly.r;
@@ -335,6 +337,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
         // Initialize velocity components
         Real vx = 0.0, vy = 0.0, vz = 0.0;
+
         // Get rid of Pressure
           pgas0 *= cs_factor;
           
@@ -482,7 +485,8 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
 //========================================================================================
 //! \fn void Mesh::UserWorkInLoop()
-//! \brief Track shock breakout times at r≈star_radius for angles in [0, 90°] and log CSV.
+//! \brief JET DRIVING inside cells add a radial velocity.
+//!       Track shock breakout times at r≈star_radius for angles in [0, 90°] and log CSV.
 //========================================================================================
 void Mesh::UserWorkInLoop() {
   // Ensure parameters were cached
@@ -569,7 +573,7 @@ void Mesh::UserWorkInLoop() {
     int dbg_in_rad = 0;        // cells with rad <= jet_rinj (geometric nozzle)
     int dbg_angle_ok = 0;      // cells that also pass the angle/wedge gate
     int dbg_written = 0;       // cells actually overwritten with jet state
-    // -------------------------------------------------------
+
     for (int nb=0; nb<nblocal; ++nb) {
       MeshBlock* pmb = my_blocks(nb);
       auto &coord = *pmb->pcoord;
