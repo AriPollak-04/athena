@@ -116,16 +116,73 @@ static Real Hst_Eexcess(MeshBlock *pmb, int iout) {
   return sum;
 }
 
-static Real Hst_Px(MeshBlock *pmb, int iout) {
+// Integrate over only positive x and then reflect over x=0 plane
+
+static Real Hst_Px_pos(MeshBlock *pmb, int iout) {
   Coordinates *pco = pmb->pcoord;
   AthenaArray<Real> &u = pmb->phydro->u;
   Real sum = 0.0;
   for (int k = pmb->ks; k <= pmb->ke; ++k)
     for (int j = pmb->js; j <= pmb->je; ++j)
-      for (int i = pmb->is; i <= pmb->ie; ++i)
-        sum += u(IM1,k,j,i) * pco->GetCellVolume(k,j,i);
+      for (int i = pmb->is; i <= pmb->ie; ++i) {
+        Real Mx;
+        if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+          Mx = u(IM1,k,j,i);
+        } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+          Real ph = pco->x2v(j);
+          Real MR   = u(IM1,k,j,i);
+          Real Mphi = u(IM2,k,j,i);
+          Mx = MR*std::cos(ph) - Mphi*std::sin(ph);
+        } else { // spherical_polar
+          Real th = pco->x2v(j);
+          Real ph = pco->x3v(k);
+          Real Mr  = u(IM1,k,j,i);
+          Real Mth = u(IM2,k,j,i);
+          Real Mph = u(IM3,k,j,i);
+          Real erx  = std::sin(th)*std::cos(ph);
+          Real etx  = std::cos(th)*std::cos(ph);
+          Real ephx = -std::sin(ph);
+          Mx = Mr*erx + Mth*etx + Mph*ephx;
+        }
+        if (Mx > 0.0)
+          sum += Mx * pco->GetCellVolume(k,j,i);
+      }
   return sum;
 }
+
+static Real Hst_Px_neg(MeshBlock *pmb, int iout) {
+  Coordinates *pco = pmb->pcoord;
+  AthenaArray<Real> &u = pmb->phydro->u;
+  Real sum = 0.0;
+  for (int k = pmb->ks; k <= pmb->ke; ++k)
+    for (int j = pmb->js; j <= pmb->je; ++j)
+      for (int i = pmb->is; i <= pmb->ie; ++i) {
+        Real Mx;
+        if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+          Mx = u(IM1,k,j,i);
+        } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+          Real ph = pco->x2v(j);
+          Real MR   = u(IM1,k,j,i);
+          Real Mphi = u(IM2,k,j,i);
+          Mx = MR*std::cos(ph) - Mphi*std::sin(ph);
+        } else { // spherical_polar
+          Real th = pco->x2v(j);
+          Real ph = pco->x3v(k);
+          Real Mr  = u(IM1,k,j,i);
+          Real Mth = u(IM2,k,j,i);
+          Real Mph = u(IM3,k,j,i);
+          Real erx  = std::sin(th)*std::cos(ph);
+          Real etx  = std::cos(th)*std::cos(ph);
+          Real ephx = -std::sin(ph);
+          Mx = Mr*erx + Mth*etx + Mph*ephx;
+        }
+        if (Mx < 0.0)
+          sum += Mx * pco->GetCellVolume(k,j,i); // remains negative
+      }
+  return sum;
+}
+
+
 
 static Real Hst_Py(MeshBlock *pmb, int iout) {
   Coordinates *pco = pmb->pcoord;
@@ -133,8 +190,33 @@ static Real Hst_Py(MeshBlock *pmb, int iout) {
   Real sum = 0.0;
   for (int k = pmb->ks; k <= pmb->ke; ++k)
     for (int j = pmb->js; j <= pmb->je; ++j)
-      for (int i = pmb->is; i <= pmb->ie; ++i)
-        sum += u(IM2,k,j,i) * pco->GetCellVolume(k,j,i);
+      for (int i = pmb->is; i <= pmb->ie; ++i) {
+        Real My;
+        if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+          My = u(IM2,k,j,i);
+        } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+          // native basis: (R, phi, z). Transform to Cartesian y: My = MR*sin(phi) + Mphi*cos(phi)
+          Real ph = pco->x2v(j);
+          Real MR   = u(IM1,k,j,i);
+          Real Mphi = u(IM2,k,j,i);
+          My = MR*std::sin(ph) + Mphi*std::cos(ph);
+        } else { // spherical_polar: native basis (r, theta, phi)
+          // Cartesian y components of (e_r, e_theta, e_phi):
+          // e_r_y =  sin(theta) sin(phi)
+          // e_th_y = cos(theta) sin(phi)
+          // e_ph_y =  cos(phi)
+          Real th = pco->x2v(j);
+          Real ph = pco->x3v(k);
+          Real Mr  = u(IM1,k,j,i);
+          Real Mth = u(IM2,k,j,i);
+          Real Mph = u(IM3,k,j,i);
+          Real ery  = std::sin(th)*std::sin(ph);
+          Real ety  = std::cos(th)*std::sin(ph);
+          Real ephy =  std::cos(ph);
+          My = Mr*ery + Mth*ety + Mph*ephy;
+        }
+        sum += My * pco->GetCellVolume(k,j,i);
+      }
   return sum;
 }
 
@@ -144,8 +226,22 @@ static Real Hst_Pz(MeshBlock *pmb, int iout) {
   Real sum = 0.0;
   for (int k = pmb->ks; k <= pmb->ke; ++k)
     for (int j = pmb->js; j <= pmb->je; ++j)
-      for (int i = pmb->is; i <= pmb->ie; ++i)
-        sum += u(IM3,k,j,i) * pco->GetCellVolume(k,j,i);
+      for (int i = pmb->is; i <= pmb->ie; ++i) {
+        Real Mz;
+        if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+          Mz = u(IM3,k,j,i);
+        } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+          // native z is Cartesian z in cylindrical coords
+          Mz = u(IM3,k,j,i);
+        } else { // spherical_polar
+          // Cartesian z components: e_r_z = cos(theta), e_th_z = -sin(theta), e_ph_z = 0
+          Real th = pco->x2v(j);
+          Real Mr  = u(IM1,k,j,i);
+          Real Mth = u(IM2,k,j,i);
+          Mz = Mr*std::cos(th) - Mth*std::sin(th);
+        }
+        sum += Mz * pco->GetCellVolume(k,j,i);
+      }
   return sum;
 }
 
@@ -192,13 +288,14 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   jet_enabled = (jet_t_stop > 0.0) && (jet_rinj > 0.0) && (jet_Gam >= 1.0);
 
   // Register global integrals in history output (allocate N slots, then enroll by index)
-  AllocateUserHistoryOutput(6);
+  AllocateUserHistoryOutput(7);
   EnrollUserHistoryOutput(0, Hst_Etot,    "E_tot");
   EnrollUserHistoryOutput(1, Hst_Eexcess, "E_excess"); // Etot - D (tau)
-  EnrollUserHistoryOutput(2, Hst_Px,      "Px_tot");
-  EnrollUserHistoryOutput(3, Hst_Py,      "Py_tot");
-  EnrollUserHistoryOutput(4, Hst_Pz,      "Pz_tot");
-  EnrollUserHistoryOutput(5, Hst_PgasInt, "Pgas_int");
+  EnrollUserHistoryOutput(2, Hst_Px_pos,      "Px_pos");
+  EnrollUserHistoryOutput(3, Hst_Px_neg,      "Px_neg");
+  EnrollUserHistoryOutput(4, Hst_Py,      "Py_tot");
+  EnrollUserHistoryOutput(5, Hst_Pz,      "Pz_tot");
+  EnrollUserHistoryOutput(6, Hst_PgasInt, "Pgas_int");
 
   if (Globals::my_rank == 0) {
     std::fprintf(stderr,
