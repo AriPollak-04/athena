@@ -69,6 +69,11 @@ static PolytropeData LoadPolytropeCSV(const std::string &filename) {
 int RefinementCondition(MeshBlock *pmb);
 
 Real threshold;
+// Optional AMR velocity masking / trigger: configured in InitUserMeshData
+// amr_v_cut: below this speed, ignore rho/P gradients (treat as static star)
+// amr_v_ref: reference speed to scale the velocity-based indicator (eta_v = |v|/amr_v_ref)
+static Real amr_v_cut = 0.0;
+static Real amr_v_ref = 0.0;
 
 // --- breakout tracking (configured in InitUserMeshData) ---
 static Real breakout_rout, breakout_x1_0, breakout_x2_0, breakout_x3_0;
@@ -104,6 +109,7 @@ static Real Hst_Etot(MeshBlock *pmb, int iout) {
         sum += u(IEN,k,j,i) * pco->GetCellVolume(k,j,i); // Etot density * dV
   return sum;
 }
+
 
 static Real Hst_Eexcess(MeshBlock *pmb, int iout) {
   Coordinates *pco = pmb->pcoord;
@@ -256,6 +262,45 @@ static Real Hst_PgasInt(MeshBlock *pmb, int iout) {
   return sum;
 }
 
+// ---- User-defined per-cell outputs for VTK/HDF5 ----
+// Constant (or cell-dependent, if EOS supports it) adiabatic index Γ
+static Real Out_Gamma(MeshBlock *pmb, int iout, int k, int j, int i) {
+  return pmb->peos->GetGamma();
+}
+
+// Gas enthalpy w_gas = rho + Γ/(Γ-1) * p_gas (SR/NR gas-only contribution)
+static Real Out_wgas(MeshBlock *pmb, int iout, int k, int j, int i) {
+  AthenaArray<Real> &w = pmb->phydro->w;
+  const Real gamma = pmb->peos->GetGamma();
+  const Real rho   = w(IDN,k,j,i);
+  const Real pgas  = w(IPR,k,j,i);
+  return rho + (gamma/(gamma - 1.0))*pgas;
+}
+
+// ---- History helpers (global integrals) ----
+// ∫ Γ dV (use with V_tot to form volume-avg Γ = Gamma_int / V_tot)
+static Real Hst_GammaInt(MeshBlock *pmb, int iout) {
+  Coordinates *pco = pmb->pcoord;
+  const Real gamma = pmb->peos->GetGamma();
+  Real sum = 0.0;
+  for (int k = pmb->ks; k <= pmb->ke; ++k)
+    for (int j = pmb->js; j <= pmb->je; ++j)
+      for (int i = pmb->is; i <= pmb->ie; ++i)
+        sum += gamma * pco->GetCellVolume(k,j,i);
+  return sum;
+}
+
+// ∫ dV (total volume)
+static Real Hst_Volume(MeshBlock *pmb, int iout) {
+  Coordinates *pco = pmb->pcoord;
+  Real sum = 0.0;
+  for (int k = pmb->ks; k <= pmb->ke; ++k)
+    for (int j = pmb->js; j <= pmb->je; ++j)
+      for (int i = pmb->is; i <= pmb->ie; ++i)
+        sum += pco->GetCellVolume(k,j,i);
+  return sum;
+}
+
 
 
 
@@ -263,7 +308,11 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   if (adaptive) {
     EnrollUserRefinementCondition(RefinementCondition);
     threshold = pin->GetReal("problem","thr");
+    amr_v_cut = pin->GetOrAddReal("problem", "amr_v_cut", 0.0);
+    amr_v_ref = pin->GetOrAddReal("problem", "amr_v_ref", 0.0);
   }
+
+
   // Breakout tracker inputs (available to UserWorkInLoop without a pin)
   breakout_rout   = pin->GetReal("problem", "star_radius");
   breakout_x1_0   = pin->GetOrAddReal("problem", "x1_0", 0.0);
@@ -288,14 +337,16 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   jet_enabled = (jet_t_stop > 0.0) && (jet_rinj > 0.0) && (jet_Gam >= 1.0);
 
   // Register global integrals in history output (allocate N slots, then enroll by index)
-  AllocateUserHistoryOutput(7);
-  EnrollUserHistoryOutput(0, Hst_Etot,    "E_tot");
-  EnrollUserHistoryOutput(1, Hst_Eexcess, "E_excess"); // Etot - D (tau)
-  EnrollUserHistoryOutput(2, Hst_Px_pos,      "Px_pos");
-  EnrollUserHistoryOutput(3, Hst_Px_neg,      "Px_neg");
-  EnrollUserHistoryOutput(4, Hst_Py,      "Py_tot");
-  EnrollUserHistoryOutput(5, Hst_Pz,      "Pz_tot");
-  EnrollUserHistoryOutput(6, Hst_PgasInt, "Pgas_int");
+  AllocateUserHistoryOutput(9);
+  EnrollUserHistoryOutput(0, Hst_Etot,     "E_tot");
+  EnrollUserHistoryOutput(1, Hst_Eexcess,  "E_excess"); // Etot - D (tau)
+  EnrollUserHistoryOutput(2, Hst_Px_pos,   "Px_pos");
+  EnrollUserHistoryOutput(3, Hst_Px_neg,   "Px_neg");
+  EnrollUserHistoryOutput(4, Hst_Py,       "Py_tot");
+  EnrollUserHistoryOutput(5, Hst_Pz,       "Pz_tot");
+  EnrollUserHistoryOutput(6, Hst_PgasInt,  "Pgas_int");
+  EnrollUserHistoryOutput(7, Hst_GammaInt, "Gamma_int");
+  EnrollUserHistoryOutput(8, Hst_Volume,   "V_tot");
 
   if (Globals::my_rank == 0) {
     std::fprintf(stderr,
@@ -986,13 +1037,36 @@ int RefinementCondition(MeshBlock *pmb) {
         Real gp = std::sqrt(gpx*gpx + gpy*gpy + gpz*gpz);
         Real gr = std::sqrt(grx*grx + gry*gry + grz*grz);
 
-        // Dimensionless indicators
+        // Dimensionless indicators from pressure/density
         Real p   = std::max(w(IPR,k,j,i), pfloor);
         Real rho = std::max(w(IDN,k,j,i), rhofloor);
         Real eta_p = gp * dmin / p;
         Real eta_r = gr * dmin / rho;
 
-        Real eta = std::max(eta_p, eta_r); // shocks + contacts
+        // Velocity magnitude (native basis components)
+        Real vx = w(IVX,k,j,i);
+        Real vy = has_y ? w(IVY,k,j,i) : 0.0;
+        Real vz = has_z ? w(IVZ,k,j,i) : 0.0;
+        Real v2 = vx*vx + vy*vy + vz*vz;
+        Real vmag = std::sqrt(v2);
+
+        // If below a configured speed, treat as static star: ignore rho/P gradients there
+        if (vmag < amr_v_cut) {
+          eta_p = 0.0;
+          eta_r = 0.0;
+        }
+
+        // Optional velocity-based refinement indicator (e.g. for jets / blast wave)
+        Real eta_v = 0.0;
+        if (amr_v_ref > 0.0) {
+          eta_v = vmag / amr_v_ref;
+        }
+
+        // Combine all indicators
+        Real eta = eta_p;
+        if (eta_r > eta) eta = eta_r;
+        if (eta_v > eta) eta = eta_v;
+
         if (eta > max_eta) max_eta = eta;
       }
     }
@@ -1000,7 +1074,7 @@ int RefinementCondition(MeshBlock *pmb) {
 
   // Hysteresis using existing 'threshold' input as tau_ref
   Real tau_ref   = threshold;
-  Real tau_deref = (Real)0.7 * threshold; // prevent thrashing
+  Real tau_deref = (Real)0.9 * threshold; // prevent thrashing
 
   if (max_eta > tau_ref)   return 1;   // refine
   if (max_eta < tau_deref) return -1;  // derefine
