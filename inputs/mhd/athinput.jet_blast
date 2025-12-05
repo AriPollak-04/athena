@@ -9,7 +9,7 @@ problem_id = jet_blast    # problem ID: basename of output filenames
 <output1>
 file_type  = hdf5        # Binary data dump
 variable   = prim,cons      # variables to be output
-dt         = 0.01      # time increment between outputs
+dt         = 0.001      # time increment between outputs
 
 <output2>
 file_type  = hst
@@ -17,19 +17,19 @@ dt         = 0.01
 <time>
 cfl_number = 0.25        # The Courant, Friedrichs, & Lewy (CFL) Number
 nlim       = -1         # cycle limit 
-tlim       = 25      # time limit
+tlim       = 5      # time limit
 integrator  = vl2       # time integration algorithm
 xorder      = 2         # order of spatial reconstruction
 ncycle_out  = 10         # interval for stdout summary info
 
 <mesh>
-nx1        = 150      # Number of zones in X1-direction
+nx1        = 300      # Number of zones in X1-direction
 x1min      = 1e-6      # minimum value of X1
-x1max      = 2    # maximum value of X1
+x1max      = 1.5    # maximum value of X1
 ix1_bc     = outflow    # inner-X1 boundary flag
 ox1_bc     = outflow    # outer-X1 boundary flag
 
-nx2        = 250      # Number of zones in X2-direction
+nx2        = 300      # Number of zones in X2-direction
 x2min       = 0.0000000000000000e+00
 x2max       = 6.283185307179586
 ix2_bc     = periodic        # inner-X2 boundary flag
@@ -46,6 +46,11 @@ numlevel       = 3
 derefine_count    = 4
 
 adapt_interval = 10
+
+<meshblock>
+nx1 = 10
+nx2 = 10
+nx3 = 1
 
 <hydro>
 gamma           = 1.3333333333333333  # gamma = C_p/C_v
@@ -81,9 +86,9 @@ x2_0 = 0.0
 x3_0 = 0.0
 
 # AMR parameters
-thr        = 1e3
-amr_v_cut  = 0.1   # below this, treat as static star
-amr_v_ref  = 0.05   # scale for velocity indicator (eta_v = |v| / 0.05)
+thr        = 0.9   # refine when (v - v_cut) / v_ref ~ 1
+amr_v_cut  = 0.00      # below this, treat as static
+amr_v_ref  = 0.00       # v ~ 0.07 => eta_v ~ 1
 
 
 #For physical blast

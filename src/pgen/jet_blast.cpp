@@ -310,6 +310,11 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     threshold = pin->GetReal("problem","thr");
     amr_v_cut = pin->GetOrAddReal("problem", "amr_v_cut", 0.0);
     amr_v_ref = pin->GetOrAddReal("problem", "amr_v_ref", 0.0);
+    if (Globals::my_rank == 0) {
+      std::fprintf(stderr,
+        "[AMR:init] threshold (thr) = %g  amr_v_cut=%g  amr_v_ref=%g\n",
+        (double)threshold, (double)amr_v_cut, (double)amr_v_ref);
+    }
   }
 
 
@@ -966,15 +971,25 @@ int RefinementCondition(MeshBlock *pmb) {
   const Real tiny    = (Real)1e-99;
 
   // Coordinate-aware spacing helpers (cell-centered, handles edges)
+  // Local effective cell sizes in each direction:
+  // - Use one-sided spacing at the physical block edges
+  // - Use the average of left/right spacings in the interior
+  // This keeps the gradient normalization reasonable even on non-uniform meshes.
   auto dx1_at = [&](int i)->Real {
+    // Left edge: forward difference spacing Δx = x(i+1) - x(i)
     if (i == pmb->is) return coord.x1v(i+1) - coord.x1v(i);
+    // Right edge: backward difference spacing Δx = x(i) - x(i-1)
     if (i == pmb->ie) return coord.x1v(i)   - coord.x1v(i-1);
+    // Interior: average of left/right spacings so it behaves well on stretched grids
     Real hp = coord.x1v(i+1) - coord.x1v(i);
     Real hm = coord.x1v(i)   - coord.x1v(i-1);
     return (Real)0.5*(hp + hm);
   };
   auto dx2_at = [&](int j)->Real {
+    // If there is no y-dimension (1D/2D runs), this is never used in a meaningful way;
+    // just return some finite value so the function is well-defined.
     if (!has_y) return dx1_at(pmb->is); // unused, but return something finite
+    // Same edge/interior logic as x1: one-sided at edges, averaged in the interior.
     if (j == pmb->js) return coord.x2v(j+1) - coord.x2v(j);
     if (j == pmb->je) return coord.x2v(j)   - coord.x2v(j-1);
     Real hp = coord.x2v(j+1) - coord.x2v(j);
@@ -982,6 +997,7 @@ int RefinementCondition(MeshBlock *pmb) {
     return (Real)0.5*(hp + hm);
   };
   auto dx3_at = [&](int k)->Real {
+    // Analogous helper for the x3 direction, with the same edge/interior pattern.
     if (!has_z) return dx1_at(pmb->is);
     if (k == pmb->ks) return coord.x3v(k+1) - coord.x3v(k);
     if (k == pmb->ke) return coord.x3v(k)   - coord.x3v(k-1);
@@ -990,7 +1006,13 @@ int RefinementCondition(MeshBlock *pmb) {
     return (Real)0.5*(hp + hm);
   };
 
-  // One-sided at edges, centered otherwise
+  // Derivative helpers: ∂A/∂x in each direction.
+  // We do:
+  //   - forward difference at the left edge
+  //   - backward difference at the right edge
+  //   - centered difference in the interior
+  // The denominators use the actual coordinate differences (which may be non-uniform),
+  // and we add a tiny number to avoid division-by-zero edge cases.
   auto dA_dx1 = [&](int k,int j,int i,int comp)->Real {
     if (i == pmb->is)
       return (w(comp,k,j,i+1) - w(comp,k,j,i)) / (coord.x1v(i+1) - coord.x1v(i) + tiny);
@@ -999,6 +1021,8 @@ int RefinementCondition(MeshBlock *pmb) {
     return (w(comp,k,j,i+1) - w(comp,k,j,i-1)) / (coord.x1v(i+1) - coord.x1v(i-1) + tiny);
   };
   auto dA_dx2 = [&](int k,int j,int i,int comp)->Real {
+    // If we do not have a y-direction on this mesh, there is no variation in y,
+    // so treat the derivative as zero.
     if (!has_y) return 0.0;
     if (j == pmb->js)
       return (w(comp,k,j+1,i) - w(comp,k,j,i)) / (coord.x2v(j+1) - coord.x2v(j) + tiny);
@@ -1007,6 +1031,7 @@ int RefinementCondition(MeshBlock *pmb) {
     return (w(comp,k,j+1,i) - w(comp,k,j-1,i)) / (coord.x2v(j+1) - coord.x2v(j-1) + tiny);
   };
   auto dA_dx3 = [&](int k,int j,int i,int comp)->Real {
+    // Likewise for z: in lower-dimensional runs, there is no z-variation.
     if (!has_z) return 0.0;
     if (k == pmb->ks)
       return (w(comp,k+1,j,i) - w(comp,k,j,i)) / (coord.x3v(k+1) - coord.x3v(k) + tiny);
@@ -1015,68 +1040,42 @@ int RefinementCondition(MeshBlock *pmb) {
     return (w(comp,k+1,j,i) - w(comp,k-1,j,i)) / (coord.x3v(k+1) - coord.x3v(k-1) + tiny);
   };
 
-  Real max_eta = 0.0; // composite indicator across the block
+  // Simple AMR indicator: maximum flow speed in this block.
+  // We ignore all pressure/density structure and refine purely on |v|.
+  Real max_v = 0.0;
 
   for (int k = pmb->ks; k <= pmb->ke; ++k) {
     for (int j = pmb->js; j <= pmb->je; ++j) {
       for (int i = pmb->is; i <= pmb->ie; ++i) {
-        // Local cell size for normalization (level-independent)
-        Real dx1 = dx1_at(i);
-        Real dx2 = has_y ? dx2_at(j) : dx1;
-        Real dx3 = has_z ? dx3_at(k) : dx1;
-        Real dmin = std::min(dx1, std::min(dx2, dx3));
-
-        // Gradients
-        Real gpx = dA_dx1(k,j,i, IPR);
-        Real gpy = dA_dx2(k,j,i, IPR);
-        Real gpz = dA_dx3(k,j,i, IPR);
-        Real grx = dA_dx1(k,j,i, IDN);
-        Real gry = dA_dx2(k,j,i, IDN);
-        Real grz = dA_dx3(k,j,i, IDN);
-
-        Real gp = std::sqrt(gpx*gpx + gpy*gpy + gpz*gpz);
-        Real gr = std::sqrt(grx*grx + gry*gry + grz*grz);
-
-        // Dimensionless indicators from pressure/density
-        Real p   = std::max(w(IPR,k,j,i), pfloor);
-        Real rho = std::max(w(IDN,k,j,i), rhofloor);
-        Real eta_p = gp * dmin / p;
-        Real eta_r = gr * dmin / rho;
-
-        // Velocity magnitude (native basis components)
+        // --- SIMPLE VELOCITY-ONLY AMR INDICATOR ---
+        // Compute the flow speed (in the native basis) and track the maximum over the block.
         Real vx = w(IVX,k,j,i);
         Real vy = has_y ? w(IVY,k,j,i) : 0.0;
         Real vz = has_z ? w(IVZ,k,j,i) : 0.0;
-        Real v2 = vx*vx + vy*vy + vz*vz;
-        Real vmag = std::sqrt(v2);
 
-        // If below a configured speed, treat as static star: ignore rho/P gradients there
-        if (vmag < amr_v_cut) {
-          eta_p = 0.0;
-          eta_r = 0.0;
-        }
+        // q ~ γβ, convert to β: β = q / sqrt(1 + q^2)
+        Real q2  = vx*vx + vy*vy + vz*vz;
+        Real q   = std::sqrt(q2);
+        Real vmag = q / std::sqrt(1.0 + q2);  // physical β in [0,1)
 
-        // Optional velocity-based refinement indicator (e.g. for jets / blast wave)
-        Real eta_v = 0.0;
-        if (amr_v_ref > 0.0) {
-          eta_v = vmag / amr_v_ref;
-        }
-
-        // Combine all indicators
-        Real eta = eta_p;
-        if (eta_r > eta) eta = eta_r;
-        if (eta_v > eta) eta = eta_v;
-
-        if (eta > max_eta) max_eta = eta;
+        if (vmag > max_v) max_v = vmag;
       }
     }
   }
 
-  // Hysteresis using existing 'threshold' input as tau_ref
+  // Hysteresis using 'threshold' as a velocity threshold (in code units).
+  // Refine if the maximum speed in this block exceeds tau_ref,
+  // derefine if it falls below tau_deref.
+  if (Globals::my_rank == 0 && pmb->gid == 0) {
+  std::fprintf(stderr,
+    "[AMR:step] t=%g  max_v(block0)=%g  thr=%g\n",
+    (double)pmb->pmy_mesh->time, (double)max_v, (double)threshold);
+
+  }
   Real tau_ref   = threshold;
   Real tau_deref = (Real)0.9 * threshold; // prevent thrashing
 
-  if (max_eta > tau_ref)   return 1;   // refine
-  if (max_eta < tau_deref) return -1;  // derefine
-  return 0;                            // keep
+  if (max_v > tau_ref)   return 1;   // refine
+  if (max_v < tau_deref) return -1;  // derefine
+  return 0;                          // keep
 }
