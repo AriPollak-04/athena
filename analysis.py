@@ -10,7 +10,7 @@ import astropy.constants as c
 hst_file = '/Users/aripollak/work/jet_blast.hst'
 hst_data = pd.read_csv(hst_file, delim_whitespace=True, comment='#', header=None)
 hst_data.columns = ['time', 'dt', 'mass', 'mom1', 'mom2', 'mom3',
-                    'KE1', 'KE2', 'KE3', 'totE', 'Etot', 'Eexcess', 'Px_pos', 'Px_neg', 'Py_tot', 'Pz_tot', 'Pgas']
+                    'KE1', 'KE2', 'KE3', 'totE', 'Etot', 'Eexcess', 'Px_pos', 'Px_neg', 'Py_tot', 'Pz_tot', 'Pgas', 'Gamma_int', 'V_tot']
 
 
 P_total = np.sqrt((hst_data['Px_pos'] + hst_data['Px_neg'])**2 + hst_data['Py_tot']**2 + hst_data['Pz_tot']**2)

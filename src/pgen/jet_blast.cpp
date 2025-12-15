@@ -953,129 +953,171 @@ void Mesh::UserWorkInLoop() {
 
 // refinement condition: check the maximum pressure gradient
 int RefinementCondition(MeshBlock *pmb) {
+
+  // ---------------------------------------------------------------------------
+  // NOTE: Previous refinement condition retained for reference.
+  //       Disabled in favor of energy-threshold refinement below.
+  // ---------------------------------------------------------------------------
   AthenaArray<Real> &w = pmb->phydro->w;
   Coordinates &coord = *pmb->pcoord;
+
+  // Optional radial cap (kept from existing code)
+  // Real rcen = coord.x1v(pmb->is) + coord.x1v(pmb->ie);
+  // rcen *= 0.5;
+  // if (rcen > 4.0) return 0;   // no AMR out beyond 4.0R
+
+  // // Dimensionality flags
+  // bool has_y = (pmb->block_size.nx2 > 1) || pmb->pmy_mesh->f2;
+  // bool has_z = (pmb->block_size.nx3 > 1) || pmb->pmy_mesh->f3;
+
+  // // Floors for safe normalization
+  // const Real pfloor  = (Real)1e-20;
+  // const Real rhofloor= (Real)1e-30;
+  // const Real tiny    = (Real)1e-99;
+
+  // // Coordinate-aware spacing helpers (cell-centered, handles edges)
+  // // Local effective cell sizes in each direction:
+  // // - Use one-sided spacing at the physical block edges
+  // // - Use the average of left/right spacings in the interior
+  // // This keeps the gradient normalization reasonable even on non-uniform meshes.
+  // auto dx1_at = [&](int i)->Real {
+  //   // Left edge: forward difference spacing Δx = x(i+1) - x(i)
+  //   if (i == pmb->is) return coord.x1v(i+1) - coord.x1v(i);
+  //   // Right edge: backward difference spacing Δx = x(i) - x(i-1)
+  //   if (i == pmb->ie) return coord.x1v(i)   - coord.x1v(i-1);
+  //   // Interior: average of left/right spacings so it behaves well on stretched grids
+  //   Real hp = coord.x1v(i+1) - coord.x1v(i);
+  //   Real hm = coord.x1v(i)   - coord.x1v(i-1);
+  //   return (Real)0.5*(hp + hm);
+  // };
+  // auto dx2_at = [&](int j)->Real {
+  //   // If there is no y-dimension (1D/2D runs), this is never used in a meaningful way;
+  //   // just return some finite value so the function is well-defined.
+  //   if (!has_y) return dx1_at(pmb->is); // unused, but return something finite
+  //   // Same edge/interior logic as x1: one-sided at edges, averaged in the interior.
+  //   if (j == pmb->js) return coord.x2v(j+1) - coord.x2v(j);
+  //   if (j == pmb->je) return coord.x2v(j)   - coord.x2v(j-1);
+  //   Real hp = coord.x2v(j+1) - coord.x2v(j);
+  //   Real hm = coord.x2v(j)   - coord.x2v(j-1);
+  //   return (Real)0.5*(hp + hm);
+  // };
+  // auto dx3_at = [&](int k)->Real {
+  //   // Analogous helper for the x3 direction, with the same edge/interior pattern.
+  //   if (!has_z) return dx1_at(pmb->is);
+  //   if (k == pmb->ks) return coord.x3v(k+1) - coord.x3v(k);
+  //   if (k == pmb->ke) return coord.x3v(k)   - coord.x3v(k-1);
+  //   Real hp = coord.x3v(k+1) - coord.x3v(k);
+  //   Real hm = coord.x3v(k)   - coord.x3v(k-1);
+  //   return (Real)0.5*(hp + hm);
+  // };
+
+  // // Derivative helpers: ∂A/∂x in each direction.
+  // // We do:
+  // //   - forward difference at the left edge
+  // //   - backward difference at the right edge
+  // //   - centered difference in the interior
+  // // The denominators use the actual coordinate differences (which may be non-uniform),
+  // // and we add a tiny number to avoid division-by-zero edge cases.
+  // auto dA_dx1 = [&](int k,int j,int i,int comp)->Real {
+  //   if (i == pmb->is)
+  //     return (w(comp,k,j,i+1) - w(comp,k,j,i)) / (coord.x1v(i+1) - coord.x1v(i) + tiny);
+  //   if (i == pmb->ie)
+  //     return (w(comp,k,j,i)   - w(comp,k,j,i-1)) / (coord.x1v(i)   - coord.x1v(i-1) + tiny);
+  //   return (w(comp,k,j,i+1) - w(comp,k,j,i-1)) / (coord.x1v(i+1) - coord.x1v(i-1) + tiny);
+  // };
+  // auto dA_dx2 = [&](int k,int j,int i,int comp)->Real {
+  //   // If we do not have a y-direction on this mesh, there is no variation in y,
+  //   // so treat the derivative as zero.
+  //   if (!has_y) return 0.0;
+  //   if (j == pmb->js)
+  //     return (w(comp,k,j+1,i) - w(comp,k,j,i)) / (coord.x2v(j+1) - coord.x2v(j) + tiny);
+  //   if (j == pmb->je)
+  //     return (w(comp,k,j,i)   - w(comp,k,j-1,i)) / (coord.x2v(j)   - coord.x2v(j-1) + tiny);
+  //   return (w(comp,k,j+1,i) - w(comp,k,j-1,i)) / (coord.x2v(j+1) - coord.x2v(j-1) + tiny);
+  // };
+  // auto dA_dx3 = [&](int k,int j,int i,int comp)->Real {
+  //   // Likewise for z: in lower-dimensional runs, there is no z-variation.
+  //   if (!has_z) return 0.0;
+  //   if (k == pmb->ks)
+  //     return (w(comp,k+1,j,i) - w(comp,k,j,i)) / (coord.x3v(k+1) - coord.x3v(k) + tiny);
+  //   if (k == pmb->ke)
+  //     return (w(comp,k,j,i)   - w(comp,k-1,j,i)) / (coord.x3v(k)   - coord.x3v(k-1) + tiny);
+  //   return (w(comp,k+1,j,i) - w(comp,k-1,j,i)) / (coord.x3v(k+1) - coord.x3v(k-1) + tiny);
+  // };
+
+  // // Simple AMR indicator: maximum flow speed in this block.
+  // // We ignore all pressure/density structure and refine purely on |v|.
+  // Real max_v = 0.0;
+
+  // for (int k = pmb->ks; k <= pmb->ke; ++k) {
+  //   for (int j = pmb->js; j <= pmb->je; ++j) {
+  //     for (int i = pmb->is; i <= pmb->ie; ++i) {
+  //       // --- SIMPLE VELOCITY-ONLY AMR INDICATOR ---
+  //       // Compute the flow speed (in the native basis) and track the maximum over the block.
+  //       Real vx = w(IVX,k,j,i);
+  //       Real vy = has_y ? w(IVY,k,j,i) : 0.0;
+  //       Real vz = has_z ? w(IVZ,k,j,i) : 0.0;
+
+  //       // q ~ γβ, convert to β: β = q / sqrt(1 + q^2)
+  //       Real q2  = vx*vx + vy*vy + vz*vz;
+  //       Real q   = std::sqrt(q2);
+  //       Real vmag = q / std::sqrt(1.0 + q2);  // physical β in [0,1)
+
+  //       if (vmag > max_v) max_v = vmag;
+  //     }
+  //   }
+  // }
+
+  // // Hysteresis using 'threshold' as a velocity threshold (in code units).
+  // // Refine if the maximum speed in this block exceeds tau_ref,
+  // // derefine if it falls below tau_deref.
+  // if (Globals::my_rank == 0 && pmb->gid == 0) {
+  // std::fprintf(stderr,
+  //   "[AMR:step] t=%g  max_v(block0)=%g  thr=%g\n",
+  //   (double)pmb->pmy_mesh->time, (double)max_v, (double)threshold);
+
+  // }
+  // Real tau_ref   = threshold;
+  // Real tau_deref = (Real)0.9 * threshold; // prevent thrashing
+
+
+
+  // ---------------------------------------------------------------------------
+  // ENERGY-BASED AMR INDICATOR (active)
+  // Refine if the maximum conserved total energy density in this block exceeds
+  // the user threshold. Derefine with hysteresis.
+  //
+  // Uses conserved `u(IEN)` ("total energy" in Athena++ hydro arrays).
+  // `threshold` is read from input `problem/thr` in InitUserMeshData.
+  // ---------------------------------------------------------------------------
+  AthenaArray<Real> &u = pmb->phydro->u;
 
   // Optional radial cap (kept from existing code)
   Real rcen = coord.x1v(pmb->is) + coord.x1v(pmb->ie);
   rcen *= 0.5;
   if (rcen > 4.0) return 0;   // no AMR out beyond 4.0R
 
-  // Dimensionality flags
-  bool has_y = (pmb->block_size.nx2 > 1) || pmb->pmy_mesh->f2;
-  bool has_z = (pmb->block_size.nx3 > 1) || pmb->pmy_mesh->f3;
-
-  // Floors for safe normalization
-  const Real pfloor  = (Real)1e-20;
-  const Real rhofloor= (Real)1e-30;
-  const Real tiny    = (Real)1e-99;
-
-  // Coordinate-aware spacing helpers (cell-centered, handles edges)
-  // Local effective cell sizes in each direction:
-  // - Use one-sided spacing at the physical block edges
-  // - Use the average of left/right spacings in the interior
-  // This keeps the gradient normalization reasonable even on non-uniform meshes.
-  auto dx1_at = [&](int i)->Real {
-    // Left edge: forward difference spacing Δx = x(i+1) - x(i)
-    if (i == pmb->is) return coord.x1v(i+1) - coord.x1v(i);
-    // Right edge: backward difference spacing Δx = x(i) - x(i-1)
-    if (i == pmb->ie) return coord.x1v(i)   - coord.x1v(i-1);
-    // Interior: average of left/right spacings so it behaves well on stretched grids
-    Real hp = coord.x1v(i+1) - coord.x1v(i);
-    Real hm = coord.x1v(i)   - coord.x1v(i-1);
-    return (Real)0.5*(hp + hm);
-  };
-  auto dx2_at = [&](int j)->Real {
-    // If there is no y-dimension (1D/2D runs), this is never used in a meaningful way;
-    // just return some finite value so the function is well-defined.
-    if (!has_y) return dx1_at(pmb->is); // unused, but return something finite
-    // Same edge/interior logic as x1: one-sided at edges, averaged in the interior.
-    if (j == pmb->js) return coord.x2v(j+1) - coord.x2v(j);
-    if (j == pmb->je) return coord.x2v(j)   - coord.x2v(j-1);
-    Real hp = coord.x2v(j+1) - coord.x2v(j);
-    Real hm = coord.x2v(j)   - coord.x2v(j-1);
-    return (Real)0.5*(hp + hm);
-  };
-  auto dx3_at = [&](int k)->Real {
-    // Analogous helper for the x3 direction, with the same edge/interior pattern.
-    if (!has_z) return dx1_at(pmb->is);
-    if (k == pmb->ks) return coord.x3v(k+1) - coord.x3v(k);
-    if (k == pmb->ke) return coord.x3v(k)   - coord.x3v(k-1);
-    Real hp = coord.x3v(k+1) - coord.x3v(k);
-    Real hm = coord.x3v(k)   - coord.x3v(k-1);
-    return (Real)0.5*(hp + hm);
-  };
-
-  // Derivative helpers: ∂A/∂x in each direction.
-  // We do:
-  //   - forward difference at the left edge
-  //   - backward difference at the right edge
-  //   - centered difference in the interior
-  // The denominators use the actual coordinate differences (which may be non-uniform),
-  // and we add a tiny number to avoid division-by-zero edge cases.
-  auto dA_dx1 = [&](int k,int j,int i,int comp)->Real {
-    if (i == pmb->is)
-      return (w(comp,k,j,i+1) - w(comp,k,j,i)) / (coord.x1v(i+1) - coord.x1v(i) + tiny);
-    if (i == pmb->ie)
-      return (w(comp,k,j,i)   - w(comp,k,j,i-1)) / (coord.x1v(i)   - coord.x1v(i-1) + tiny);
-    return (w(comp,k,j,i+1) - w(comp,k,j,i-1)) / (coord.x1v(i+1) - coord.x1v(i-1) + tiny);
-  };
-  auto dA_dx2 = [&](int k,int j,int i,int comp)->Real {
-    // If we do not have a y-direction on this mesh, there is no variation in y,
-    // so treat the derivative as zero.
-    if (!has_y) return 0.0;
-    if (j == pmb->js)
-      return (w(comp,k,j+1,i) - w(comp,k,j,i)) / (coord.x2v(j+1) - coord.x2v(j) + tiny);
-    if (j == pmb->je)
-      return (w(comp,k,j,i)   - w(comp,k,j-1,i)) / (coord.x2v(j)   - coord.x2v(j-1) + tiny);
-    return (w(comp,k,j+1,i) - w(comp,k,j-1,i)) / (coord.x2v(j+1) - coord.x2v(j-1) + tiny);
-  };
-  auto dA_dx3 = [&](int k,int j,int i,int comp)->Real {
-    // Likewise for z: in lower-dimensional runs, there is no z-variation.
-    if (!has_z) return 0.0;
-    if (k == pmb->ks)
-      return (w(comp,k+1,j,i) - w(comp,k,j,i)) / (coord.x3v(k+1) - coord.x3v(k) + tiny);
-    if (k == pmb->ke)
-      return (w(comp,k,j,i)   - w(comp,k-1,j,i)) / (coord.x3v(k)   - coord.x3v(k-1) + tiny);
-    return (w(comp,k+1,j,i) - w(comp,k-1,j,i)) / (coord.x3v(k+1) - coord.x3v(k-1) + tiny);
-  };
-
-  // Simple AMR indicator: maximum flow speed in this block.
-  // We ignore all pressure/density structure and refine purely on |v|.
-  Real max_v = 0.0;
-
+  Real max_e = 0.0;
   for (int k = pmb->ks; k <= pmb->ke; ++k) {
     for (int j = pmb->js; j <= pmb->je; ++j) {
       for (int i = pmb->is; i <= pmb->ie; ++i) {
-        // --- SIMPLE VELOCITY-ONLY AMR INDICATOR ---
-        // Compute the flow speed (in the native basis) and track the maximum over the block.
-        Real vx = w(IVX,k,j,i);
-        Real vy = has_y ? w(IVY,k,j,i) : 0.0;
-        Real vz = has_z ? w(IVZ,k,j,i) : 0.0;
-
-        // q ~ γβ, convert to β: β = q / sqrt(1 + q^2)
-        Real q2  = vx*vx + vy*vy + vz*vz;
-        Real q   = std::sqrt(q2);
-        Real vmag = q / std::sqrt(1.0 + q2);  // physical β in [0,1)
-
-        if (vmag > max_v) max_v = vmag;
+        Real ecell = u(IEN, k, j, i);
+        if (std::isfinite(ecell) && ecell > max_e) max_e = ecell;
       }
     }
   }
 
-  // Hysteresis using 'threshold' as a velocity threshold (in code units).
-  // Refine if the maximum speed in this block exceeds tau_ref,
-  // derefine if it falls below tau_deref.
+  // Hysteresis using 'threshold' as an energy-density threshold (code units).
+  Real e_ref   = threshold;
+  Real e_deref = (Real)0.9 * threshold; // prevent thrashing
+
   if (Globals::my_rank == 0 && pmb->gid == 0) {
-  std::fprintf(stderr,
-    "[AMR:step] t=%g  max_v(block0)=%g  thr=%g\n",
-    (double)pmb->pmy_mesh->time, (double)max_v, (double)threshold);
-
+    std::fprintf(stderr,
+      "[AMR:step] t=%g  max_E(block0)=%g  thr=%g\n",
+      (double)pmb->pmy_mesh->time, (double)max_e, (double)threshold);
   }
-  Real tau_ref   = threshold;
-  Real tau_deref = (Real)0.9 * threshold; // prevent thrashing
 
-  if (max_v > tau_ref)   return 1;   // refine
-  if (max_v < tau_deref) return -1;  // derefine
-  return 0;                          // keep
+  if (max_e > e_ref)   return 1;   // refine
+  if (max_e < e_deref) return -1;  // derefine
+  return 0;                         // keep
 }
