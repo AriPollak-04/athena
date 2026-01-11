@@ -86,9 +86,11 @@ x2_0 = 0.0
 x3_0 = 0.0
 
 # AMR parameters
-thr        = 0.75   # refine when (v - v_cut) / v_ref ~ 1
-amr_v_cut  = 0.00      # below this, treat as static
-amr_v_ref  = 0.00       # v ~ 0.07 => eta_v ~ 1
+thr        = 0.9   # refine when (v - v_cut) / v_ref ~ 1
+amr_mode   =  3    
+amr_v_cut  = 0.01      # below this, treat as static
+amr_v_ref  = 0.7       # v ~ 0.07 => eta_v ~ 1
+amr_e_ref = 0.0
 
 
 #For physical blast

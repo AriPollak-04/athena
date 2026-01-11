@@ -74,6 +74,14 @@ Real threshold;
 // amr_v_ref: reference speed to scale the velocity-based indicator (eta_v = |v|/amr_v_ref)
 static Real amr_v_cut = 0.0;
 static Real amr_v_ref = 0.0;
+// AMR indicator selector:
+// 0: max |v| (beta) in block
+// 1: max conserved energy density u(IEN)
+// 2: max normalized gradients of ln(rho) and ln(p)
+// 3: hybrid (use gradients in quasi-static star, velocity/energy in jet)
+static int  amr_mode = 0;
+// Optional energy scale used in hybrid mode (if <=0, energy is ignored)
+static Real amr_e_ref = 0.0;
 
 // --- breakout tracking (configured in InitUserMeshData) ---
 static Real breakout_rout, breakout_x1_0, breakout_x2_0, breakout_x3_0;
@@ -308,12 +316,14 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   if (adaptive) {
     EnrollUserRefinementCondition(RefinementCondition);
     threshold = pin->GetReal("problem","thr");
+    amr_mode  = pin->GetOrAddInteger("problem", "amr_mode", 0);
     amr_v_cut = pin->GetOrAddReal("problem", "amr_v_cut", 0.0);
     amr_v_ref = pin->GetOrAddReal("problem", "amr_v_ref", 0.0);
+    amr_e_ref = pin->GetOrAddReal("problem", "amr_e_ref", 0.0);
     if (Globals::my_rank == 0) {
       std::fprintf(stderr,
-        "[AMR:init] threshold (thr) = %g  amr_v_cut=%g  amr_v_ref=%g\n",
-        (double)threshold, (double)amr_v_cut, (double)amr_v_ref);
+        "[AMR:init] thr=%g  amr_mode=%d  amr_v_cut=%g  amr_v_ref=%g  amr_e_ref=%g\n",
+        (double)threshold, (int)amr_mode, (double)amr_v_cut, (double)amr_v_ref, (double)amr_e_ref);
     }
   }
 
@@ -953,171 +963,181 @@ void Mesh::UserWorkInLoop() {
 
 // refinement condition: check the maximum pressure gradient
 int RefinementCondition(MeshBlock *pmb) {
-
   // ---------------------------------------------------------------------------
-  // NOTE: Previous refinement condition retained for reference.
-  //       Disabled in favor of energy-threshold refinement below.
+  // AMR INDICATORS
+  // We compute several candidate indicators and then select/combine them based
+  // on `amr_mode`.
   // ---------------------------------------------------------------------------
   AthenaArray<Real> &w = pmb->phydro->w;
   Coordinates &coord = *pmb->pcoord;
-
-  // Optional radial cap (kept from existing code)
-  // Real rcen = coord.x1v(pmb->is) + coord.x1v(pmb->ie);
-  // rcen *= 0.5;
-  // if (rcen > 4.0) return 0;   // no AMR out beyond 4.0R
-
-  // // Dimensionality flags
-  // bool has_y = (pmb->block_size.nx2 > 1) || pmb->pmy_mesh->f2;
-  // bool has_z = (pmb->block_size.nx3 > 1) || pmb->pmy_mesh->f3;
-
-  // // Floors for safe normalization
-  // const Real pfloor  = (Real)1e-20;
-  // const Real rhofloor= (Real)1e-30;
-  // const Real tiny    = (Real)1e-99;
-
-  // // Coordinate-aware spacing helpers (cell-centered, handles edges)
-  // // Local effective cell sizes in each direction:
-  // // - Use one-sided spacing at the physical block edges
-  // // - Use the average of left/right spacings in the interior
-  // // This keeps the gradient normalization reasonable even on non-uniform meshes.
-  // auto dx1_at = [&](int i)->Real {
-  //   // Left edge: forward difference spacing Δx = x(i+1) - x(i)
-  //   if (i == pmb->is) return coord.x1v(i+1) - coord.x1v(i);
-  //   // Right edge: backward difference spacing Δx = x(i) - x(i-1)
-  //   if (i == pmb->ie) return coord.x1v(i)   - coord.x1v(i-1);
-  //   // Interior: average of left/right spacings so it behaves well on stretched grids
-  //   Real hp = coord.x1v(i+1) - coord.x1v(i);
-  //   Real hm = coord.x1v(i)   - coord.x1v(i-1);
-  //   return (Real)0.5*(hp + hm);
-  // };
-  // auto dx2_at = [&](int j)->Real {
-  //   // If there is no y-dimension (1D/2D runs), this is never used in a meaningful way;
-  //   // just return some finite value so the function is well-defined.
-  //   if (!has_y) return dx1_at(pmb->is); // unused, but return something finite
-  //   // Same edge/interior logic as x1: one-sided at edges, averaged in the interior.
-  //   if (j == pmb->js) return coord.x2v(j+1) - coord.x2v(j);
-  //   if (j == pmb->je) return coord.x2v(j)   - coord.x2v(j-1);
-  //   Real hp = coord.x2v(j+1) - coord.x2v(j);
-  //   Real hm = coord.x2v(j)   - coord.x2v(j-1);
-  //   return (Real)0.5*(hp + hm);
-  // };
-  // auto dx3_at = [&](int k)->Real {
-  //   // Analogous helper for the x3 direction, with the same edge/interior pattern.
-  //   if (!has_z) return dx1_at(pmb->is);
-  //   if (k == pmb->ks) return coord.x3v(k+1) - coord.x3v(k);
-  //   if (k == pmb->ke) return coord.x3v(k)   - coord.x3v(k-1);
-  //   Real hp = coord.x3v(k+1) - coord.x3v(k);
-  //   Real hm = coord.x3v(k)   - coord.x3v(k-1);
-  //   return (Real)0.5*(hp + hm);
-  // };
-
-  // // Derivative helpers: ∂A/∂x in each direction.
-  // // We do:
-  // //   - forward difference at the left edge
-  // //   - backward difference at the right edge
-  // //   - centered difference in the interior
-  // // The denominators use the actual coordinate differences (which may be non-uniform),
-  // // and we add a tiny number to avoid division-by-zero edge cases.
-  // auto dA_dx1 = [&](int k,int j,int i,int comp)->Real {
-  //   if (i == pmb->is)
-  //     return (w(comp,k,j,i+1) - w(comp,k,j,i)) / (coord.x1v(i+1) - coord.x1v(i) + tiny);
-  //   if (i == pmb->ie)
-  //     return (w(comp,k,j,i)   - w(comp,k,j,i-1)) / (coord.x1v(i)   - coord.x1v(i-1) + tiny);
-  //   return (w(comp,k,j,i+1) - w(comp,k,j,i-1)) / (coord.x1v(i+1) - coord.x1v(i-1) + tiny);
-  // };
-  // auto dA_dx2 = [&](int k,int j,int i,int comp)->Real {
-  //   // If we do not have a y-direction on this mesh, there is no variation in y,
-  //   // so treat the derivative as zero.
-  //   if (!has_y) return 0.0;
-  //   if (j == pmb->js)
-  //     return (w(comp,k,j+1,i) - w(comp,k,j,i)) / (coord.x2v(j+1) - coord.x2v(j) + tiny);
-  //   if (j == pmb->je)
-  //     return (w(comp,k,j,i)   - w(comp,k,j-1,i)) / (coord.x2v(j)   - coord.x2v(j-1) + tiny);
-  //   return (w(comp,k,j+1,i) - w(comp,k,j-1,i)) / (coord.x2v(j+1) - coord.x2v(j-1) + tiny);
-  // };
-  // auto dA_dx3 = [&](int k,int j,int i,int comp)->Real {
-  //   // Likewise for z: in lower-dimensional runs, there is no z-variation.
-  //   if (!has_z) return 0.0;
-  //   if (k == pmb->ks)
-  //     return (w(comp,k+1,j,i) - w(comp,k,j,i)) / (coord.x3v(k+1) - coord.x3v(k) + tiny);
-  //   if (k == pmb->ke)
-  //     return (w(comp,k,j,i)   - w(comp,k-1,j,i)) / (coord.x3v(k)   - coord.x3v(k-1) + tiny);
-  //   return (w(comp,k+1,j,i) - w(comp,k-1,j,i)) / (coord.x3v(k+1) - coord.x3v(k-1) + tiny);
-  // };
-
-  // // Simple AMR indicator: maximum flow speed in this block.
-  // // We ignore all pressure/density structure and refine purely on |v|.
-  // Real max_v = 0.0;
-
-  // for (int k = pmb->ks; k <= pmb->ke; ++k) {
-  //   for (int j = pmb->js; j <= pmb->je; ++j) {
-  //     for (int i = pmb->is; i <= pmb->ie; ++i) {
-  //       // --- SIMPLE VELOCITY-ONLY AMR INDICATOR ---
-  //       // Compute the flow speed (in the native basis) and track the maximum over the block.
-  //       Real vx = w(IVX,k,j,i);
-  //       Real vy = has_y ? w(IVY,k,j,i) : 0.0;
-  //       Real vz = has_z ? w(IVZ,k,j,i) : 0.0;
-
-  //       // q ~ γβ, convert to β: β = q / sqrt(1 + q^2)
-  //       Real q2  = vx*vx + vy*vy + vz*vz;
-  //       Real q   = std::sqrt(q2);
-  //       Real vmag = q / std::sqrt(1.0 + q2);  // physical β in [0,1)
-
-  //       if (vmag > max_v) max_v = vmag;
-  //     }
-  //   }
-  // }
-
-  // // Hysteresis using 'threshold' as a velocity threshold (in code units).
-  // // Refine if the maximum speed in this block exceeds tau_ref,
-  // // derefine if it falls below tau_deref.
-  // if (Globals::my_rank == 0 && pmb->gid == 0) {
-  // std::fprintf(stderr,
-  //   "[AMR:step] t=%g  max_v(block0)=%g  thr=%g\n",
-  //   (double)pmb->pmy_mesh->time, (double)max_v, (double)threshold);
-
-  // }
-  // Real tau_ref   = threshold;
-  // Real tau_deref = (Real)0.9 * threshold; // prevent thrashing
-
-
-
-  // ---------------------------------------------------------------------------
-  // ENERGY-BASED AMR INDICATOR (active)
-  // Refine if the maximum conserved total energy density in this block exceeds
-  // the user threshold. Derefine with hysteresis.
-  //
-  // Uses conserved `u(IEN)` ("total energy" in Athena++ hydro arrays).
-  // `threshold` is read from input `problem/thr` in InitUserMeshData.
-  // ---------------------------------------------------------------------------
-  AthenaArray<Real> &u = pmb->phydro->u;
 
   // Optional radial cap (kept from existing code)
   Real rcen = coord.x1v(pmb->is) + coord.x1v(pmb->ie);
   rcen *= 0.5;
   if (rcen > 4.0) return 0;   // no AMR out beyond 4.0R
 
+  // Dimensionality flags
+  bool has_y = (pmb->block_size.nx2 > 1) || pmb->pmy_mesh->f2;
+  bool has_z = (pmb->block_size.nx3 > 1) || pmb->pmy_mesh->f3;
+
+  // Floors for safe normalization
+  const Real pfloor  = (Real)1e-20;
+  const Real rhofloor= (Real)1e-30;
+  const Real tiny    = (Real)1e-99;
+
+  // Coordinate-aware spacing helpers (cell-centered, handles edges)
+  auto dx1_at = [&](int i)->Real {
+    if (i == pmb->is) return coord.x1v(i+1) - coord.x1v(i);
+    if (i == pmb->ie) return coord.x1v(i)   - coord.x1v(i-1);
+    Real hp = coord.x1v(i+1) - coord.x1v(i);
+    Real hm = coord.x1v(i)   - coord.x1v(i-1);
+    return (Real)0.5*(hp + hm);
+  };
+  auto dx2_at = [&](int j)->Real {
+    if (!has_y) return dx1_at(pmb->is);
+    if (j == pmb->js) return coord.x2v(j+1) - coord.x2v(j);
+    if (j == pmb->je) return coord.x2v(j)   - coord.x2v(j-1);
+    Real hp = coord.x2v(j+1) - coord.x2v(j);
+    Real hm = coord.x2v(j)   - coord.x2v(j-1);
+    return (Real)0.5*(hp + hm);
+  };
+  auto dx3_at = [&](int k)->Real {
+    if (!has_z) return dx1_at(pmb->is);
+    if (k == pmb->ks) return coord.x3v(k+1) - coord.x3v(k);
+    if (k == pmb->ke) return coord.x3v(k)   - coord.x3v(k-1);
+    Real hp = coord.x3v(k+1) - coord.x3v(k);
+    Real hm = coord.x3v(k)   - coord.x3v(k-1);
+    return (Real)0.5*(hp + hm);
+  };
+  auto dA_dx1 = [&](int k,int j,int i,int comp)->Real {
+    if (i == pmb->is)
+      return (w(comp,k,j,i+1) - w(comp,k,j,i)) / (coord.x1v(i+1) - coord.x1v(i) + tiny);
+    if (i == pmb->ie)
+      return (w(comp,k,j,i)   - w(comp,k,j,i-1)) / (coord.x1v(i)   - coord.x1v(i-1) + tiny);
+    return (w(comp,k,j,i+1) - w(comp,k,j,i-1)) / (coord.x1v(i+1) - coord.x1v(i-1) + tiny);
+  };
+  auto dA_dx2 = [&](int k,int j,int i,int comp)->Real {
+    if (!has_y) return 0.0;
+    if (j == pmb->js)
+      return (w(comp,k,j+1,i) - w(comp,k,j,i)) / (coord.x2v(j+1) - coord.x2v(j) + tiny);
+    if (j == pmb->je)
+      return (w(comp,k,j,i)   - w(comp,k,j-1,i)) / (coord.x2v(j)   - coord.x2v(j-1) + tiny);
+    return (w(comp,k,j+1,i) - w(comp,k,j-1,i)) / (coord.x2v(j+1) - coord.x2v(j-1) + tiny);
+  };
+  auto dA_dx3 = [&](int k,int j,int i,int comp)->Real {
+    if (!has_z) return 0.0;
+    if (k == pmb->ks)
+      return (w(comp,k+1,j,i) - w(comp,k,j,i)) / (coord.x3v(k+1) - coord.x3v(k) + tiny);
+    if (k == pmb->ke)
+      return (w(comp,k,j,i)   - w(comp,k-1,j,i)) / (coord.x3v(k)   - coord.x3v(k-1) + tiny);
+    return (w(comp,k+1,j,i) - w(comp,k-1,j,i)) / (coord.x3v(k+1) - coord.x3v(k-1) + tiny);
+  };
+
+  // Max physical speed (beta) in this block.
+  // NOTE: In this problem generator + jet driver, primitives store 3-velocity.
+  Real max_beta = 0.0;
+
+  // Max conserved total energy density in this block (u(IEN)).
   Real max_e = 0.0;
+
+  // Max normalized gradients of ln(rho) and ln(p)
+  Real max_grad = 0.0;
+
+  AthenaArray<Real> &u = pmb->phydro->u;
+
   for (int k = pmb->ks; k <= pmb->ke; ++k) {
     for (int j = pmb->js; j <= pmb->je; ++j) {
       for (int i = pmb->is; i <= pmb->ie; ++i) {
-        Real ecell = u(IEN, k, j, i);
+        // --- speed indicator (beta) ---
+        Real vx = w(IVX,k,j,i);
+        Real vy = has_y ? w(IVY,k,j,i) : 0.0;
+        Real vz = has_z ? w(IVZ,k,j,i) : 0.0;
+        Real v2  = vx*vx + vy*vy + vz*vz;
+#if defined(RELATIVISTIC_DYNAMICS) && (RELATIVISTIC_DYNAMICS != 0)
+        // Keep subluminal
+        v2 = std::min(v2, (Real)(1.0 - 1e-12));
+#endif
+        Real beta = std::sqrt(std::max((Real)0.0, v2));
+        if (beta > max_beta) max_beta = beta;
+
+        // --- energy indicator ---
+        Real ecell = u(IEN,k,j,i);
         if (std::isfinite(ecell) && ecell > max_e) max_e = ecell;
+
+        // --- gradient indicator (dimensionless) ---
+        // Use ln(rho) and ln(p) to weight relative changes. Add floors to avoid NaNs.
+        Real rho = std::max(w(IDN,k,j,i), rhofloor);
+        Real p   = std::max(w(IPR,k,j,i), pfloor);
+
+        // Compute derivatives of ln(rho) and ln(p)
+        // d ln A / dx = (1/A) dA/dx
+        Real drho_dx1 = dA_dx1(k,j,i,IDN) / rho;
+        Real dp_dx1   = dA_dx1(k,j,i,IPR) / p;
+        Real gr1 = std::fabs(drho_dx1)*dx1_at(i) + std::fabs(dp_dx1)*dx1_at(i);
+
+        Real gr2 = 0.0;
+        if (has_y) {
+          Real drho_dx2 = dA_dx2(k,j,i,IDN) / rho;
+          Real dp_dx2   = dA_dx2(k,j,i,IPR) / p;
+          gr2 = std::fabs(drho_dx2)*dx2_at(j) + std::fabs(dp_dx2)*dx2_at(j);
+        }
+
+        Real gr3 = 0.0;
+        if (has_z) {
+          Real drho_dx3 = dA_dx3(k,j,i,IDN) / rho;
+          Real dp_dx3   = dA_dx3(k,j,i,IPR) / p;
+          gr3 = std::fabs(drho_dx3)*dx3_at(k) + std::fabs(dp_dx3)*dx3_at(k);
+        }
+
+        // Dimensionless gradient magnitude proxy
+        Real gtot = std::sqrt(gr1*gr1 + gr2*gr2 + gr3*gr3);
+        if (std::isfinite(gtot) && gtot > max_grad) max_grad = gtot;
       }
     }
   }
 
-  // Hysteresis using 'threshold' as an energy-density threshold (code units).
-  Real e_ref   = threshold;
-  Real e_deref = (Real)0.9 * threshold; // prevent thrashing
+  // ---------------------------------------------------------------------------
+  // SELECT / COMBINE INDICATOR
+  // ---------------------------------------------------------------------------
+  Real indicator = 0.0;
+
+  if (amr_mode == 0) {
+    // pure speed
+    indicator = max_beta;
+  } else if (amr_mode == 1) {
+    // pure energy density
+    indicator = max_e;
+  } else if (amr_mode == 2) {
+    // pure gradients
+    indicator = max_grad;
+  } else {
+    // hybrid: in quasi-static regions, prioritize gradients; in fast jet regions,
+    // prioritize speed, plus optionally energy (scaled by amr_e_ref).
+    Real eta_v = 0.0;
+    if (amr_v_ref > 0.0) eta_v = max_beta / amr_v_ref;
+
+    Real eta_e = 0.0;
+    if (amr_e_ref > 0.0) eta_e = max_e / amr_e_ref;
+
+    if (max_beta < amr_v_cut) {
+      indicator = max_grad;
+    } else {
+      indicator = std::max(max_grad, std::max(eta_v, eta_e));
+    }
+  }
+
+  // Hysteresis using `threshold` against the selected indicator.
+  const Real thr_ref   = threshold;
+  const Real thr_deref = (Real)0.9 * threshold; // prevent thrashing
 
   if (Globals::my_rank == 0 && pmb->gid == 0) {
     std::fprintf(stderr,
-      "[AMR:step] t=%g  max_E(block0)=%g  thr=%g\n",
-      (double)pmb->pmy_mesh->time, (double)max_e, (double)threshold);
+      "[AMR:step] t=%g  mode=%d  ind=%g  beta=%g  grad=%g  E=%g  thr=%g\n",
+      (double)pmb->pmy_mesh->time, (int)amr_mode,
+      (double)indicator, (double)max_beta, (double)max_grad, (double)max_e, (double)threshold);
   }
 
-  if (max_e > e_ref)   return 1;   // refine
-  if (max_e < e_deref) return -1;  // derefine
-  return 0;                         // keep
+  if (indicator > thr_ref)   return 1;   // refine
+  if (indicator < thr_deref) return -1;  // derefine
+  return 0;                               // keep
 }
