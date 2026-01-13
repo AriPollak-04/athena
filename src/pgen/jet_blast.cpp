@@ -91,7 +91,7 @@ static Real breakout_factor, breakout_vmin;
 static Real breakout_ringw;
 static bool breakout_params_inited = false;
 static Real breakout_phi0_deg;
-// --- jet driving parameters (configured in InitUserMeshData) ---
+// --- jet driving parameters ---
 static Real jet_t_stop = 0.0;      // stop time for driving
 static Real jet_rinj   = 0.0;      // injection radius (nozzle size)
 static Real jet_Gam    = 1.0;      // Lorentz factor of injected flow

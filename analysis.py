@@ -6,6 +6,7 @@ import pandas as pd
 import astropy.constants as c
 
 
+
 #%% lets look at the total energy and momentum conservation from the history file
 hst_file = '/Users/aripollak/work/jet_blast.hst'
 hst_data = pd.read_csv(hst_file, delim_whitespace=True, comment='#', header=None)
@@ -33,10 +34,12 @@ plt.legend()
 
 
 plt.figure(figsize=(10, 6), dpi=300)
-plt.scatter(hst_data['time'], v_eff, label='Effective Velocity (mom/E)', color='purple')
+plt.scatter(hst_data['time'], (hst_data['Px_pos'] + hst_data['Px_neg']), label='P_x', color='purple', zorder=3)
+plt.scatter(hst_data['time'], hst_data['Py_tot'], label='P_y', color='orange', zorder=2)
+plt.scatter(hst_data['time'], hst_data['Pz_tot'], label='P_z', color='cyan', zorder=1)
 plt.xlabel('Time')
-plt.ylabel('Effective Velocity')
-plt.title('Effective Velocity Conservation')
+plt.ylabel('Total Momentum')
+plt.title('Total Momentum Conservation')
 plt.grid(True)
 plt.legend()
 
@@ -95,4 +98,43 @@ ax.set_xlabel('Radius')
 plt.title('Shock Breakout Radius vs Angle')
 plt.grid(True)
 # %%
+import yt
+from pathlib import Path
+ds = yt.load('/Users/aripollak/work/jet_blast.out1.00079.athdf')
+print(ds)
+print(ds.current_time)
+print(ds.field_list)        # native fields
+print(ds.derived_field_list)
+slc = yt.SlicePlot(ds, "z", ("gas", "pressure"))
+slc.set_log(("gas","pressure"), True)
+slc.show()
+# %%
+ts = yt.load('/Users/aripollak/work/jet_blast.out1.*.athdf')
+frames_dir = Path.home() / "work" / "frames_density"
+frames_dir.mkdir(parents=True, exist_ok=True)
+print(len(ts))
 
+for i, ds in enumerate(ts):
+    p = yt.SlicePlot(ds, "z", ("gas", "density"))
+    p.set_log(("gas", "density"), True)
+    p.annotate_timestamp(corner="upper_left")
+    # Optional: keep the color scaling fixed across time (avoids "breathing")
+    # p.set_zlim(("gas","density"), 1e-6, 1e-2)
+    p.save(frames_dir / f"frame_{i:05d}.png")
+#%%
+import subprocess
+
+mp4_path = str(frames_dir / "density_z.mp4")
+subprocess.run([
+    "ffmpeg", "-y",
+    "-framerate", "24",
+    "-i", str(frames_dir / "frame_%05d.png"),
+    "-c:v", "libx264",
+    "-pix_fmt", "yuv420p",
+    "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+    mp4_path
+], check=True)
+from IPython.display import Video, display
+display(Video(mp4_path, embed=True))
+
+# %%
