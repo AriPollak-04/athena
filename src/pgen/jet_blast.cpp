@@ -91,7 +91,7 @@ static Real breakout_factor, breakout_vmin;
 static Real breakout_ringw;
 static bool breakout_params_inited = false;
 static Real breakout_phi0_deg;
-// --- jet driving parameters ---
+// --- jet driving parameters (configured in InitUserMeshData) ---
 static Real jet_t_stop = 0.0;      // stop time for driving
 static Real jet_rinj   = 0.0;      // injection radius (nozzle size)
 static Real jet_Gam    = 1.0;      // Lorentz factor of injected flow
@@ -971,10 +971,15 @@ int RefinementCondition(MeshBlock *pmb) {
   AthenaArray<Real> &w = pmb->phydro->w;
   Coordinates &coord = *pmb->pcoord;
 
-  // Optional radial cap (kept from existing code)
-  Real rcen = coord.x1v(pmb->is) + coord.x1v(pmb->ie);
-  rcen *= 0.5;
-  if (rcen > 4.0) return 0;   // no AMR out beyond 4.0R
+  // Absolute AMR exclusion zone near the axis
+  const Real R_AMR_MIN = 0.03;
+
+  // Use block-edge radius, not center
+  Real r_block_min = coord.x1f(pmb->is);
+
+  if (r_block_min < R_AMR_MIN*1.2) {
+    return -1;  // force derefinement
+  }
 
   // Dimensionality flags
   bool has_y = (pmb->block_size.nx2 > 1) || pmb->pmy_mesh->f2;
