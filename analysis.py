@@ -5,6 +5,13 @@ import h5py
 import pandas as pd
 import astropy.constants as c
 
+import yt
+from pathlib import Path
+ds = yt.load('/scratch/aripoll/athena_out/outputs/jet_blast.out1.00079.athdf')
+print(ds)
+print(ds.current_time)
+print(ds.field_list)        # native fields
+print(ds.derived_field_list)
 
 
 #%% lets look at the total energy and momentum conservation from the history file
