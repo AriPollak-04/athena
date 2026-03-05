@@ -91,16 +91,14 @@ static Real breakout_factor, breakout_vmin;
 static Real breakout_ringw;
 static bool breakout_params_inited = false;
 static Real breakout_phi0_deg;
-// --- jet driving parameters (configured in InitUserMeshData) ---
+// --- jet driving parameters ---
 static Real jet_t_stop = 0.0;      // stop time for driving
 static Real jet_rinj   = 0.0;      // injection radius (nozzle size)
 static Real jet_Gam    = 1.0;      // Lorentz factor of injected flow
 static Real jet_rho    = 0.0;      // comoving rest-mass density in jet
 static Real jet_p      = 0.0;      // gas pressure in jet
-static Real gate_dir_min = 0.0;    // angle gate min (same meaning as problem/dir_angle_min)
-static Real gate_dir_max = M_PI;   // angle gate max (same as problem/dir_angle_max)
+static Real gate_theta0 = M_PI;    // half-opening angle; inject within theta_0 of each pole
 static Real gate_phi0   = 0.0;     // center direction for 2D Cartesian wedge (radians)
-static bool gate_cone_bipolar = true; // also include opposite wedge
 static bool jet_enabled = false;   // enable jet driving when inputs provided
 // ----------------------------------------------------------
 
@@ -344,10 +342,8 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   jet_Gam    = pin->GetOrAddReal("problem", "jet_Gam", 1.0);
   jet_rho    = pin->GetOrAddReal("problem", "jet_rho", 0.0);
   jet_p      = pin->GetOrAddReal("problem", "jet_p", 0.0);
-  gate_dir_min = pin->GetOrAddReal("problem", "dir_angle_min", 0.0);
-  gate_dir_max = pin->GetOrAddReal("problem", "dir_angle_max", M_PI);
-  gate_phi0    = pin->GetOrAddReal("problem", "phi0", 0.0);
-  gate_cone_bipolar = pin->GetOrAddBoolean("problem", "cone_bipolar", true);
+  gate_theta0 = pin->GetOrAddReal("problem", "theta_0", M_PI);
+  gate_phi0   = pin->GetOrAddReal("problem", "phi0", 0.0);
   // Enable jet only if a positive stop time and radius are provided
   jet_enabled = (jet_t_stop > 0.0) && (jet_rinj > 0.0) && (jet_Gam >= 1.0);
 
@@ -365,11 +361,10 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   if (Globals::my_rank == 0) {
     std::fprintf(stderr,
-      "[jet:init] enabled=%d t_stop=%g rinj=%g Gam=%g rho=%g p=%g gate=[%g,%g] phi0=%g bipolar=%d\n",
+      "[jet:init] enabled=%d t_stop=%g rinj=%g Gam=%g rho=%g p=%g theta_0=%g phi0=%g (always bipolar)\n",
       (int)jet_enabled, (double)jet_t_stop, (double)jet_rinj, (double)jet_Gam,
       (double)jet_rho, (double)jet_p,
-      (double)gate_dir_min, (double)gate_dir_max, (double)gate_phi0,
-      (int)gate_cone_bipolar);
+      (double)gate_theta0, (double)gate_phi0);
   }
   breakout_params_inited = true;
   return;
@@ -782,28 +777,16 @@ void Mesh::UserWorkInLoop() {
 
             if (is2d && std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
               auto wrap_pm_pi = [](Real a)->Real { a = std::fmod(a + M_PI, 2.0*M_PI); if (a < 0.0) a += 2.0*M_PI; return a - M_PI; };
-              Real dphi  = wrap_pm_pi(phi_dir - gate_phi0);
-              bool angle_ok_primary = (dphi >= gate_dir_min && dphi <= gate_dir_max);
-              bool angle_ok_bip = false;
-              if (gate_cone_bipolar) {
-                Real dphi2 = wrap_pm_pi(phi_dir - (gate_phi0 + M_PI));
-                angle_ok_bip = (dphi2 >= gate_dir_min && dphi2 <= gate_dir_max);
-              }
-              angle_ok = angle_ok_primary || angle_ok_bip;
+              Real dphi = wrap_pm_pi(phi_dir - gate_phi0);
+              angle_ok = (std::fabs(dphi) <= gate_theta0) || (std::fabs(dphi) >= M_PI - gate_theta0);
             }
             else if (is2d && std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
               auto wrap_pm_pi = [](Real a)->Real { a = std::fmod(a + M_PI, 2.0*M_PI); if (a < 0.0) a += 2.0*M_PI; return a - M_PI; };
-              Real dphi  = wrap_pm_pi(phi_dir - gate_phi0);
-              bool angle_ok_primary = (dphi >= gate_dir_min && dphi <= gate_dir_max);
-              bool angle_ok_bip = false;
-              if (gate_cone_bipolar) {
-                Real dphi2 = wrap_pm_pi(phi_dir - (gate_phi0 + M_PI));
-                angle_ok_bip = (dphi2 >= gate_dir_min && dphi2 <= gate_dir_max);
-              }
-              angle_ok = angle_ok_primary || angle_ok_bip;
+              Real dphi = wrap_pm_pi(phi_dir - gate_phi0);
+              angle_ok = (std::fabs(dphi) <= gate_theta0) || (std::fabs(dphi) >= M_PI - gate_theta0);
             }
             else {
-              angle_ok = (theta_dir >= gate_dir_min && theta_dir <= gate_dir_max);
+              angle_ok = (theta_dir <= gate_theta0) || (theta_dir >= M_PI - gate_theta0);
             }
 
             if (!angle_ok) {
@@ -971,15 +954,10 @@ int RefinementCondition(MeshBlock *pmb) {
   AthenaArray<Real> &w = pmb->phydro->w;
   Coordinates &coord = *pmb->pcoord;
 
-  // Absolute AMR exclusion zone near the axis
-  const Real R_AMR_MIN = 0.03;
-
-  // Use block-edge radius, not center
-  Real r_block_min = coord.x1f(pmb->is);
-
-  if (r_block_min < R_AMR_MIN*1.2) {
-    return -1;  // force derefinement
-  }
+  // Optional radial cap (kept from existing code)
+  Real rcen = coord.x1v(pmb->is) + coord.x1v(pmb->ie);
+  rcen *= 0.5;
+  if (rcen > 4.0) return 0;   // no AMR out beyond 4.0R
 
   // Dimensionality flags
   bool has_y = (pmb->block_size.nx2 > 1) || pmb->pmy_mesh->f2;
