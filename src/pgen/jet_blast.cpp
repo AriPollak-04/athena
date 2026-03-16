@@ -62,6 +62,7 @@ static PolytropeData LoadPolytropeCSV(const std::string &filename) {
 #include "../globals.hpp"
 #include "../hydro/hydro.hpp"
 #include "../mesh/mesh.hpp"
+#include "../scalars/scalars.hpp"
 
 #include "../parameter_input.hpp"
 
@@ -436,6 +437,8 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   }
 
 
+  bool is2d = (ks == ke); // true for 2D runs (single zone in x3)
+
   // setup uniform ambient medium with spherical over-pressured region
   for (int k=ks; k<=ke; k++) {
     for (int j=js; j<=je; j++) {
@@ -561,6 +564,45 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         // diagnostic: v^2 sanity
         if (!std::isfinite(v2)) nan_v2++;
         #endif
+        // Create angle_ok gate for passive scalar injection (mirrors UserWorkInLoop)
+        bool angle_ok = true;
+        if (jet_enabled) {
+          Real xloc = x - x0;
+          Real yloc = y - y0;
+          Real zloc = z - z0;
+          Real phi_dir = std::atan2(yloc, xloc);
+          if (phi_dir < 0.0) phi_dir += 2.0*M_PI;
+
+          if (is2d && std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+            auto wrap_pm_pi = [](Real a)->Real { a = std::fmod(a + M_PI, 2.0*M_PI); if (a < 0.0) a += 2.0*M_PI; return a - M_PI; };
+            Real dphi = wrap_pm_pi(phi_dir - gate_phi0);
+            angle_ok = (std::fabs(dphi) <= gate_theta0) || (std::fabs(dphi) >= M_PI - gate_theta0);
+          } else if (is2d && std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+            auto wrap_pm_pi = [](Real a)->Real { a = std::fmod(a + M_PI, 2.0*M_PI); if (a < 0.0) a += 2.0*M_PI; return a - M_PI; };
+            Real dphi = wrap_pm_pi(phi_dir - gate_phi0);
+            angle_ok = (std::fabs(dphi) <= gate_theta0) || (std::fabs(dphi) >= M_PI - gate_theta0);
+          } else {
+            // 3D: bipolar cone check using position relative to center
+            Real ct_dir = (rad > 0.0) ? (zloc / rad) : 1.0;
+            ct_dir = std::max((Real)-1.0, std::min((Real)1.0, ct_dir));
+            Real theta_dir = std::acos(ct_dir);
+            angle_ok = (theta_dir <= gate_theta0) || (theta_dir >= M_PI - gate_theta0);
+          }
+        }
+
+
+
+        // Initialize passive scalar: r=1 inside jet nozzle (rad <= jet_rinj AND angle gate), r=0 elsewhere
+        if (NSCALARS > 0) {
+          for (int n = 0; n < NSCALARS; ++n) {
+            pscalars->s(n,k,j,i) = 0.0;
+            pscalars->r(n,k,j,i) = 0.0;
+            if (angle_ok && rad <= jet_rinj) {
+              pscalars->s(n,k,j,i) = rho; // s = rho * r, r=1
+              pscalars->r(n,k,j,i) = 1.0;
+            }
+          }
+        }
 
       }
     }
@@ -876,6 +918,14 @@ void Mesh::UserWorkInLoop() {
             u(IM3,k,j,i) = rho * v3;
             u(IEN,k,j,i) = pgas/gm1 + 0.5*rho*v2mag;
 #endif
+            // Mark jet cells with scalar = 1 (conserved: s = rho, primitive: r = 1)
+            // if (NSCALARS > 0) {
+            //   for (int n = 0; n < NSCALARS; ++n) {
+            //     pmb->pscalars->s(n,k,j,i) = rho;
+            //     pmb->pscalars->r(n,k,j,i) = 1.0;
+            //   }
+            // }
+
             // Count cells actually written with jet state this step
             ++dbg_written;
           }

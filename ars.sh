@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=192
-#SBATCH --time=16:00:00
+#SBATCH --time=12:00:00
 #SBATCH --job-name=ars
 #SBATCH --output=/scratch/aripoll/athena_out/outputs/ars.out
 #SBATCH --mail-user=ari.pollak@mail.utoronto.ca
@@ -15,7 +15,7 @@ module load openmpi/4.1.5
 module load hdf5-mpi/1.14.2
 
 
-python configure.py --prob=jet_blast --coord=cylindrical -hdf5 -mpi --hdf5_path="$SCRATCH" -s --flux=hlle
+python configure.py  --prob=jet_blast --coord=cylindrical -hdf5 -mpi --hdf5_path="$SCRATCH" -s --flux=hlle --nscalars=1
 make clean
 make -j 192
 

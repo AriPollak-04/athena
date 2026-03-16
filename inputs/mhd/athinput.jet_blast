@@ -1,15 +1,14 @@
 <comment>
-problem   = Blandford and McKee 1976 SR blast wave inside star
+problem   = Bipolar Jet Blast With Stellar Envelope
 reference = Gardiner. T.A. & Stone, J.M., JCP, 205, 509 (2005) (for MHD version of test)
-configure = --prob=jet_blast --coord=cylindrical -hdf5 --hdf5_path="$CONDA_PREFIX" -s
-
+configure = --prob=jet_blast --coord=cylindrical -hdf5 -mpi --hdf5_path="$SCRATCH" -s --flux=hlle --nscalars=1
 <job>
 problem_id = jet_blast    # problem ID: basename of output filenames
 
 <output1>
 file_type  = hdf5        # Binary data dump
 variable   = prim,cons      # variables to be output
-dt         = 0.02      # time increment between outputs
+dt         = 0.005      # time increment between outputs
 
 <output2>
 file_type  = hst
@@ -18,19 +17,19 @@ dt         = 0.01
 <time>
 cfl_number = 0.25        # The Courant, Friedrichs, & Lewy (CFL) Number
 nlim       = -1         # cycle limit 
-tlim       = 25      # time limit
+tlim       = 3.5      # time limit
 integrator  = vl2       # time integration algorithm
 xorder      = 2         # order of spatial reconstruction
 ncycle_out  = 10         # interval for stdout summary info
 
 <mesh>
-nx1        = 900      # Number of zones in X1-direction
+nx1        = 1600      # Number of zones in X1-direction
 x1min      = 1e-3      # minimum value of X1
 x1max      = 1.5    # maximum value of X1
 ix1_bc     = outflow    # inner-X1 boundary flag
 ox1_bc     = outflow    # outer-X1 boundary flag
 
-nx2        = 600      # Number of zones in X2-direction
+nx2        = 900      # Number of zones in X2-direction
 x2min       = 0.0000000000000000e+00
 x2max       = 6.283185307179586
 ix2_bc     = periodic        # inner-X2 boundary flag
@@ -70,12 +69,13 @@ poly_csv_path = /scratch/aripoll/athena/polytrope_n3.00.csv
 cs_factor = 1e-6
 phi0            = 0
 theta_0         = 0.15
-t_stop        = 3
+t_stop        = 0.6
 jet_rinj      = 0.1
-jet_Gam       = 6.5
-jet_rho       = 1e-6
+jet_Gam       = 20
+jet_rho       = 1e-2
 jet_p         = 1e-6
-vtheta_frac   = 0.2
+
+
 
 
 
