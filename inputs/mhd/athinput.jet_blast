@@ -7,6 +7,7 @@ problem_id = jet_blast    # problem ID: basename of output filenames
 
 <output1>
 file_type  = hdf5        # Binary data dump
+data_format = double     # HDF5 storage precision (float/double/half/quad)
 variable   = prim,cons      # variables to be output
 dt         = 0.005      # time increment between outputs
 
@@ -71,7 +72,7 @@ phi0            = 0
 theta_0         = 0.15
 t_stop        = 0.6
 jet_rinj      = 0.1
-jet_Gam       = 20
+jet_Gam       = 6.5
 jet_rho       = 1e-2
 jet_p         = 1e-6
 
