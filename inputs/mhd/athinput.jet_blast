@@ -7,7 +7,7 @@ problem_id = jet_blast    # problem ID: basename of output filenames
 
 <output1>
 file_type  = hdf5        # Binary data dump
-data_format = double     # HDF5 storage precision (float/double/half/quad)
+data_format = double     
 variable   = prim,cons      # variables to be output
 dt         = 0.005      # time increment between outputs
 
@@ -18,19 +18,19 @@ dt         = 0.01
 <time>
 cfl_number = 0.25        # The Courant, Friedrichs, & Lewy (CFL) Number
 nlim       = -1         # cycle limit 
-tlim       = 3.5      # time limit
+tlim       = 6      # time limit
 integrator  = vl2       # time integration algorithm
 xorder      = 2         # order of spatial reconstruction
 ncycle_out  = 10         # interval for stdout summary info
 
 <mesh>
-nx1        = 1600      # Number of zones in X1-direction
+nx1        = 1200      # Number of zones in X1-direction
 x1min      = 1e-3      # minimum value of X1
 x1max      = 1.5    # maximum value of X1
 ix1_bc     = outflow    # inner-X1 boundary flag
 ox1_bc     = outflow    # outer-X1 boundary flag
 
-nx2        = 900      # Number of zones in X2-direction
+nx2        = 800      # Number of zones in X2-direction
 x2min       = 0.0000000000000000e+00
 x2max       = 6.283185307179586
 ix2_bc     = periodic        # inner-X2 boundary flag
@@ -69,11 +69,11 @@ poly_csv_path = /scratch/aripoll/athena/polytrope_n3.00.csv
 # Blast setup 
 cs_factor = 1e-6
 phi0            = 0
-theta_0         = 0.15
-t_stop        = 0.6
-jet_rinj      = 0.1
-jet_Gam       = 6.5
-jet_rho       = 1e-2
+theta_0         = 0.174533
+t_stop        = 4.8
+jet_rinj      = 0.01
+jet_Gam       = 20
+jet_rho       = 0.28
 jet_p         = 1e-6
 
 
