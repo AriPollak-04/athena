@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import h5py
 import pandas as pd
-import astropy.constants as c
+import io
 
 import yt
 from pathlib import Path
@@ -15,10 +15,19 @@ print(ds.derived_field_list)
 
 
 #%% lets look at the total energy and momentum conservation from the history file
-hst_file = '/Users/aripollak/work/jet_blast.hst'
-hst_data = pd.read_csv(hst_file, delim_whitespace=True, comment='#', header=None)
-hst_data.columns = ['time', 'dt', 'mass', 'mom1', 'mom2', 'mom3',
-                    'KE1', 'KE2', 'KE3', 'totE', 'Etot', 'Eexcess', 'Px_pos', 'Px_neg', 'Py_tot', 'Pz_tot', 'Pgas', 'Gamma_int', 'V_tot']
+hst_file = '/scratch/aripoll/athena_out/outputs/jet_blast.hst'
+cols = ['time', 'dt', 'mass', 'mom1', 'mom2', 'mom3',
+        'KE1', 'KE2', 'KE3', 'totE', 'scalar', 'Etot', 'Eexcess',
+        'Px_pos', 'Px_neg', 'Py_tot', 'Pz_tot', 'Pgas', 'Gamma_int', 'V_tot']
+with open(hst_file) as f:
+    lines = f.readlines()
+header_indices = [i for i, line in enumerate(lines) if line.startswith('# Athena++')]
+runs = []
+for i, start in enumerate(header_indices):
+    end = header_indices[i+1] if i+1 < len(header_indices) else len(lines)
+    df = pd.read_csv(io.StringIO(''.join(lines[start:end])), sep=r'\s+', comment='#', header=None, names=cols)
+    runs.append(df)
+hst_data = pd.concat(runs, ignore_index=True)
 
 
 P_total = np.sqrt((hst_data['Px_pos'] + hst_data['Px_neg'])**2 + hst_data['Py_tot']**2 + hst_data['Pz_tot']**2)
@@ -29,10 +38,8 @@ v_eff = P_total / (hst_data['Etot'])
 
 # Plot total energy conservation
 plt.figure(figsize=(10, 6), dpi=300)
-
-plt.scatter(hst_data['time'], hst_data['totE'], label='Total Energy (Etot)', 
-          color='green', linestyle='--') 
-#plt.plot(hst_data['time'], P_total, label='Total Momentum', color='red')
+for i, run in enumerate(runs):
+    plt.scatter(run['time'], run['totE'], label=f'')
 plt.xlabel('Time')
 plt.ylabel('Energy')
 plt.title('Total Energy Conservation')
@@ -40,10 +47,13 @@ plt.grid(True)
 plt.legend()
 
 
+markers = ['o', 's', '^']
 plt.figure(figsize=(10, 6), dpi=300)
-plt.scatter(hst_data['time'], (hst_data['Px_pos'] + hst_data['Px_neg']), label='P_x', color='purple', zorder=3)
-plt.scatter(hst_data['time'], hst_data['Py_tot'], label='P_y', color='orange', zorder=2)
-plt.scatter(hst_data['time'], hst_data['Pz_tot'], label='P_z', color='cyan', zorder=1)
+for i, run in enumerate(runs):
+    m = markers[i % len(markers)]
+    plt.scatter(run['time'], (run['Px_pos'] + run['Px_neg']), color='purple', marker=m, label=f'P_x Run {i+1}', zorder=3)
+    plt.scatter(run['time'], run['Py_tot'], color='orange', marker=m, label=f'P_y Run {i+1}', zorder=2)
+    plt.scatter(run['time'], run['Pz_tot'], color='cyan', marker=m, label=f'P_z Run {i+1}', zorder=1)
 plt.xlabel('Time')
 plt.ylabel('Total Momentum')
 plt.title('Total Momentum Conservation')
