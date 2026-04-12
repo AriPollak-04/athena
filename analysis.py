@@ -5,15 +5,6 @@ import h5py
 import pandas as pd
 import io
 
-import yt
-from pathlib import Path
-ds = yt.load('/scratch/aripoll/athena_out/outputs/jet_blast.out1.00079.athdf')
-print(ds)
-print(ds.current_time)
-print(ds.field_list)        # native fields
-print(ds.derived_field_list)
-
-
 #%% lets look at the total energy and momentum conservation from the history file
 hst_file = '/scratch/aripoll/athena_out/outputs/jet_blast.hst'
 cols = ['time', 'dt', 'mass', 'mom1', 'mom2', 'mom3',
@@ -39,7 +30,7 @@ v_eff = P_total / (hst_data['Etot'])
 # Plot total energy conservation
 plt.figure(figsize=(10, 6), dpi=300)
 for i, run in enumerate(runs):
-    plt.scatter(run['time'], run['totE'], label=f'')
+    plt.scatter(run['time'], run['totE'], label=f'Run {i+1}')
 plt.xlabel('Time')
 plt.ylabel('Energy')
 plt.title('Total Energy Conservation')
@@ -63,10 +54,12 @@ plt.legend()
 #%%
 
 # Load the csv file
-data = pd.read_csv('/Users/aripollak/work/shock_breakout.csv')
+data = pd.read_csv('/scratch/aripoll/athena_out/outputs/shock_breakout.csv')
 data.set_index('angle_deg', inplace=True)
 
 #%%
+c = 1.0  # Speed of light in code units
+
 #Quick plot
 plt.figure(figsize=(10, 6))
 plt.plot(data.index, data['breakout_time'], marker='o', color = 'black')
@@ -77,17 +70,15 @@ plt.grid(True)
 
 plt.legend()
 
-# ct vs r*theta *******
 
 
 
 
-data['r_theta'] = data['radius'] * np.deg2rad(data.index)
 plt.figure(figsize=(10, 6))
-plt.plot(data['breakout_time']*c.c, data['r_theta'], marker='o', label='Shock Speed', color = 'black')
+plt.plot(data['breakout_time']*c, data['radius'], marker='o', label='Shock Speed', color = 'black')
 plt.xlabel('Breakout Time (ct)')
-plt.ylabel('r * theta (radians)')
-plt.title('Shock Breakout Time vs r * theta')
+plt.ylabel(r'$R_{star}$')
+plt.title('Shock Breakout Time vs Radius')
 plt.grid(True)
 
 
@@ -114,44 +105,3 @@ plt.colorbar(sc, label='Breakout Time')
 ax.set_xlabel('Radius')
 plt.title('Shock Breakout Radius vs Angle')
 plt.grid(True)
-# %%
-import yt
-from pathlib import Path
-ds = yt.load('/Users/aripollak/work/jet_blast.out1.00079.athdf')
-print(ds)
-print(ds.current_time)
-print(ds.field_list)        # native fields
-print(ds.derived_field_list)
-slc = yt.SlicePlot(ds, "z", ("gas", "pressure"))
-slc.set_log(("gas","pressure"), True)
-slc.show()
-# %%
-ts = yt.load('/Users/aripollak/work/jet_blast.out1.*.athdf')
-frames_dir = Path.home() / "work" / "frames_density"
-frames_dir.mkdir(parents=True, exist_ok=True)
-print(len(ts))
-
-for i, ds in enumerate(ts):
-    p = yt.SlicePlot(ds, "z", ("gas", "density"))
-    p.set_log(("gas", "density"), True)
-    p.annotate_timestamp(corner="upper_left")
-    # Optional: keep the color scaling fixed across time (avoids "breathing")
-    # p.set_zlim(("gas","density"), 1e-6, 1e-2)
-    p.save(frames_dir / f"frame_{i:05d}.png")
-#%%
-import subprocess
-
-mp4_path = str(frames_dir / "density_z.mp4")
-subprocess.run([
-    "ffmpeg", "-y",
-    "-framerate", "24",
-    "-i", str(frames_dir / "frame_%05d.png"),
-    "-c:v", "libx264",
-    "-pix_fmt", "yuv420p",
-    "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-    mp4_path
-], check=True)
-from IPython.display import Video, display
-display(Video(mp4_path, embed=True))
-
-# %%

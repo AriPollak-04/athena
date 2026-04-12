@@ -54,6 +54,9 @@ static PolytropeData LoadPolytropeCSV(const std::string &filename) {
 }
 
 // Athena++ headers
+#ifdef MPI_PARALLEL
+#include <mpi.h>
+#endif
 #include "../athena.hpp"
 #include "../athena_arrays.hpp"
 #include "../coordinates/coordinates.hpp"
@@ -725,26 +728,47 @@ void Mesh::UserWorkInLoop() {
     z0c = r0*std::cos(th0);
   }
 
-  // Static state across calls: per-bin breakout time and ambient reference
+  // Static state across calls: per-bin breakout time, ambient accumulator, and log flag
   static bool inited = false;
-  static std::vector<Real> t_break;     // breakout time per bin (or <0 if unknown)
-  static std::vector<Real> pamb_bin;    // ambient reference pressure per bin (sampled at t=0)
-  static std::vector<int>  logged;      // whether we've already written the line for a bin
+  static std::vector<Real> t_break;     // breakout time per bin (<0 = not yet detected)
+  static std::vector<Real> pamb_sum;    // sum of ambient pressures sampled at t<=0
+  static std::vector<Real> pamb_bin;    // finalized per-bin ambient reference (averaged)
+  static std::vector<int>  pamb_cnt;    // count of cells contributing to pamb_sum
+  static std::vector<int>  logged;      // 1 once we've written the CSV row for this bin
+  static bool pamb_finalized = false;   // true after ambient averaging is locked in
 
   // Initialize on first entry or if nbins changed
   if (!inited || (int)t_break.size() != nbins) {
     t_break.assign(nbins, -1.0);
+    pamb_sum.assign(nbins, 0.0);
     pamb_bin.assign(nbins, -1.0);
+    pamb_cnt.assign(nbins, 0);
     logged.assign(nbins, 0);
+    pamb_finalized = false;
     inited = true;
     if (Globals::my_rank == 0) {
-      // Create/overwrite CSV with a header
       FILE* f = std::fopen("shock_breakout.csv", "w");
       if (f) {
         std::fprintf(f, "angle_deg,radius,breakout_time\n");
         std::fclose(f);
       }
     }
+  }
+
+  // On the first call with time > 0, finalize ambient pressure by averaging over all
+  // t<=0 samples (with MPI reduction so every rank agrees on the same reference).
+  if (!pamb_finalized && time > 0.0) {
+#ifdef MPI_PARALLEL
+    MPI_Allreduce(MPI_IN_PLACE, pamb_sum.data(), nbins, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    std::vector<Real> cnt_real(nbins);
+    for (int b = 0; b < nbins; ++b) cnt_real[b] = static_cast<Real>(pamb_cnt[b]);
+    MPI_Allreduce(MPI_IN_PLACE, cnt_real.data(), nbins, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    for (int b = 0; b < nbins; ++b) pamb_cnt[b] = static_cast<int>(cnt_real[b] + 0.5);
+#endif
+    for (int b = 0; b < nbins; ++b) {
+      pamb_bin[b] = (pamb_cnt[b] > 0) ? (pamb_sum[b] / pamb_cnt[b]) : 1.0e-30;
+    }
+    pamb_finalized = true;
   }
 
   // Helper to convert cell center to Cartesian
@@ -764,6 +788,36 @@ void Mesh::UserWorkInLoop() {
       x = r*std::sin(th)*std::cos(ph);
       y = r*std::sin(th)*std::sin(ph);
       z = r*std::cos(th);
+    }
+  };
+
+  // Helper to convert native mesh-basis velocity (v1,v2,v3) to Cartesian (vx,vy,vz).
+  // The cell's Cartesian position (x,y,z) must already be computed via cell_to_cart.
+  auto native_vel_to_cart = [&](MeshBlock* pmb, int k, int j, int i,
+                                Real /*x*/, Real /*y*/, Real /*z*/,
+                                Real &vx, Real &vy, Real &vz) {
+    Real v1 = pmb->phydro->w(IVX,k,j,i);
+    Real v2 = pmb->phydro->w(IVY,k,j,i);
+    Real v3 = pmb->phydro->w(IVZ,k,j,i);
+    if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+      vx = v1; vy = v2; vz = v3;
+    } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+      // v1=v_R, v2=v_phi, v3=v_z; phi = atan2(y-y0c, x-x0c)
+      Real ph = pmb->pcoord->x2v(j);
+      vx = v1*std::cos(ph) - v2*std::sin(ph);
+      vy = v1*std::sin(ph) + v2*std::cos(ph);
+      vz = v3;
+    } else { // spherical_polar: v1=v_r, v2=v_theta, v3=v_phi
+      Real th = pmb->pcoord->x2v(j);
+      Real ph = pmb->pcoord->x3v(k);
+      Real sth = std::sin(th), cth = std::cos(th);
+      Real sph = std::sin(ph), cph = std::cos(ph);
+      // e_r = (sth*cph, sth*sph, cth)
+      // e_theta = (cth*cph, cth*sph, -sth)
+      // e_phi   = (-sph, cph, 0)
+      vx = v1*sth*cph + v2*cth*cph - v3*sph;
+      vy = v1*sth*sph + v2*cth*sph + v3*cph;
+      vz = v1*cth     - v2*sth;
     }
   };
 
@@ -934,7 +988,15 @@ void Mesh::UserWorkInLoop() {
     }
   }
 
-  // Scan only cells within a thin spherical shell around r = rout, and angles in [0, 90 deg]
+  // Scan cells within a symmetric shell [rout-ringw, rout+ringw] around the stellar surface.
+  // For each angular bin, accumulate the max pressure ratio and max outward radial velocity.
+  // After an MPI reduction, record the first timestep each bin crosses the breakout threshold.
+  const Real phi0_rad = breakout_phi0_deg * (M_PI/180.0);
+
+  std::vector<Real> pmax_bin(nbins, -1.0);   // max p/pamb in each bin this step
+  std::vector<Real> vrmax_bin(nbins, -1.0);  // max outward vr in each bin this step
+  std::vector<Real> rmax_bin(nbins, -1.0);   // radius of the cell with max p/pamb
+
   for (int nb=0; nb<nblocal; ++nb) {
     MeshBlock* pmb = my_blocks(nb);
     AthenaArray<Real> &w = pmb->phydro->w;
@@ -944,47 +1006,81 @@ void Mesh::UserWorkInLoop() {
           Real x, y, z; cell_to_cart(pmb, k, j, i, x, y, z);
           Real dx = x - x0c, dy = y - y0c, dz = z - z0c;
           Real rad = std::sqrt(dx*dx + dy*dy + dz*dz);
-          if (rad <= rout || rad > rout + ringw) continue;  // only near the stellar surface
+          // Symmetric shell centered on rout
+          if (std::fabs(rad - rout) > ringw) continue;
 
-          // in-plane azimuth measured from +x, wrap to [0, 2pi)
+          // In-plane azimuth relative to phi0, wrapped to [0, 2pi)
           Real phi = std::atan2(dy, dx);
           if (phi < 0.0) phi += 2.0*M_PI;
-          const Real phi0 = breakout_phi0_deg * (M_PI/180.0); // center direction in radians
-          Real phi_rel = phi - phi0;
+          Real phi_rel = phi - phi0_rad;
           if (phi_rel < 0.0) phi_rel += 2.0*M_PI;
           if (phi_rel >= 2.0*M_PI) phi_rel -= 2.0*M_PI;
-          if (phi_rel < 0.0 || phi_rel > (M_PI/2.0)) continue; // only angles in [0, 90 deg]
+          // Only track the 90-degree sector starting from phi0
+          if (phi_rel > (M_PI/2.0)) continue;
           int b = static_cast<int>( (phi_rel / (0.5*M_PI)) * nbins );
           if (b >= nbins) b = nbins-1;
 
-          // Establish ambient reference at t<=0
-          if (pamb_bin[b] < 0.0 && time <= 0.0) {
-            pamb_bin[b] = w(IPR, k, j, i);
+          // Accumulate ambient pressure at t<=0 (average over all cells per bin)
+          if (time <= 0.0) {
+            pamb_sum[b] += w(IPR, k, j, i);
+            pamb_cnt[b] += 1;
           }
 
-          // If breakout not yet recorded, test condition on this cell (outside surface)
-          if (t_break[b] < 0.0 && !logged[b]) {
-            Real pamb = (pamb_bin[b] > 0.0 ? pamb_bin[b] : 1.0e-30);
-            Real p  = w(IPR, k, j, i);
-            Real vx = w(IVX, k, j, i), vy = w(IVY, k, j, i), vz = w(IVZ, k, j, i);
-            Real vr = (rad > 0.0) ? (dx*vx + dy*vy + dz*vz)/rad : 0.0; // outward radial speed
-            if ( (p > factor * pamb) && (vr > vmin) ) {
-              t_break[b] = time;  // record first time this angle breaks out
-              logged[b]  = 1;     // ensure we only log once per bin
-              if (Globals::my_rank == 0) {
-                FILE* f = std::fopen("shock_breakout.csv", "a");
-                if (f) {
-                  // bin center angle in degrees [0,90]
-                  Real phi_center_deg = ((static_cast<Real>(b) + 0.5) * 90.0 / static_cast<Real>(nbins));
-                  std::fprintf(f, "%g,%g,%g\n", phi_center_deg, rad, t_break[b]);
-                  std::fclose(f);
-                }
-              }
-            }
+          // For detection at t>0: track per-bin max pressure ratio and outward velocity
+          if (pamb_finalized && t_break[b] < 0.0) {
+            Real pamb = (pamb_bin[b] > 0.0) ? pamb_bin[b] : 1.0e-30;
+            Real p = w(IPR, k, j, i);
+            Real pratio = p / pamb;
+            if (pratio > pmax_bin[b]) { pmax_bin[b] = pratio; rmax_bin[b] = rad; }
+
+            // Convert native velocities to Cartesian, then project onto radial direction
+            Real cvx, cvy, cvz;
+            native_vel_to_cart(pmb, k, j, i, x, y, z, cvx, cvy, cvz);
+            Real vr = (rad > 0.0) ? (dx*cvx + dy*cvy + dz*cvz)/rad : 0.0;
+            if (vr > vrmax_bin[b]) vrmax_bin[b] = vr;
           }
         }
       }
     }
+  }
+
+  // Reduce per-bin max values across all MPI ranks, then detect and log breakouts.
+  if (pamb_finalized) {
+#ifdef MPI_PARALLEL
+    // Save local pmax before the global reduction so we can identify the winning rank.
+    std::vector<Real> local_pmax(pmax_bin);
+    MPI_Allreduce(MPI_IN_PLACE, pmax_bin.data(),  nbins, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, vrmax_bin.data(), nbins, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+    // Only the rank(s) that held the global pmax contribute their radius; others zero out.
+    for (int b = 0; b < nbins; ++b) {
+      if (local_pmax[b] < pmax_bin[b]) rmax_bin[b] = -1.0;
+    }
+    MPI_Allreduce(MPI_IN_PLACE, rmax_bin.data(), nbins, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+
+    if (Globals::my_rank == 0) {
+      FILE* f = nullptr;
+      for (int b = 0; b < nbins; ++b) {
+        if (t_break[b] >= 0.0 || logged[b]) continue;  // already recorded
+        if (pmax_bin[b] > factor && vrmax_bin[b] > vmin) {
+          t_break[b] = time;
+          logged[b]  = 1;
+          if (!f) f = std::fopen("shock_breakout.csv", "a");
+          if (f) {
+            Real phi_center_deg = ((static_cast<Real>(b) + 0.5) * 90.0 / static_cast<Real>(nbins));
+            Real r_detected = (rmax_bin[b] > 0.0) ? rmax_bin[b] : rout;
+            std::fprintf(f, "%g,%g,%g\n", phi_center_deg, r_detected, t_break[b]);
+          }
+        }
+      }
+      if (f) std::fclose(f);
+    }
+
+    // Broadcast t_break and logged so all ranks stay consistent
+#ifdef MPI_PARALLEL
+    MPI_Bcast(t_break.data(), nbins, MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+    MPI_Bcast(logged.data(),  nbins, MPI_INT,          0, MPI_COMM_WORLD);
+#endif
   }
 }
 
