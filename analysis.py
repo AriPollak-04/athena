@@ -105,3 +105,4 @@ plt.colorbar(sc, label='Breakout Time')
 ax.set_xlabel('Radius')
 plt.title('Shock Breakout Radius vs Angle')
 plt.grid(True)
+# %%
