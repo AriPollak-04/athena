@@ -83,14 +83,14 @@ plt.grid(True)
 
 
 # Now take the derivative of this curve to get the speed
-# data['shock_speed'] = np.gradient(data['breakout_time'], data.index)
-# plt.figure(figsize=(10, 6))
-# plt.plot(data.index, data['shock_speed'], marker='o', label='Shock Speed', color = 'blue')
-# plt.xlabel('Angle (degrees)')
-# plt.ylabel('Shock Speed (dTime/dAngle)')
-# plt.title('Shock Speed vs Angle')
-# plt.grid(True)
-# plt.legend()
+data['shock_speed'] = np.gradient(data['breakout_time'], data.index)
+plt.figure(figsize=(10, 6))
+plt.plot(data.index, 1/data['shock_speed'], marker='o', label='Shock Speed', color = 'blue')
+plt.xlabel('Angle (degrees)')
+plt.ylabel(r'Shock Speed $\frac{R_*}{dt_{bo}/d\theta}$')
+plt.title('Shock Speed vs Angle')
+plt.grid(True)
+plt.legend()
 
 # %%
 
