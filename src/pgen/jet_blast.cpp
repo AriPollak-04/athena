@@ -457,7 +457,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
           x = pcoord->x1v(i)*std::cos(pcoord->x2v(j));
           y = pcoord->x1v(i)*std::sin(pcoord->x2v(j));
-          z = pcoord->x3v(k);
+          z = is2d ? z0 : pcoord->x3v(k);  // 2D slab: collapse to equatorial plane
           rad = std::sqrt(SQR(x - x0) + SQR(y - y0) + SQR(z - z0));
         } else { // if (std::strcmp(COORDINATE_SYSTEM, "spherical_polar") == 0)
           x = pcoord->x1v(i)*std::sin(pcoord->x2v(j))*std::cos(pcoord->x3v(k));
@@ -493,8 +493,8 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
               pgas0 = P_arr[idx-1]   + t * (P_arr[idx]   - P_arr[idx-1]);
             }
           } else {
-            rho0  = 1.0e-19;
-            pgas0 = 1.0e-19;
+            rho0  = 1.0e-25;
+            pgas0 = 1.0e-25;
           }
         }
 
