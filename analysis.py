@@ -62,7 +62,7 @@ c = 1.0  # Speed of light in code units
 
 #Quick plot
 plt.figure(figsize=(10, 6))
-plt.plot(data.index, data['breakout_time'], marker='o', color = 'black')
+plt.scatter(data.index, data['breakout_time'], marker='o', color = 'black', s=1)
 plt.xlabel('Angle (degrees)')
 plt.ylabel('Breakout Time')
 plt.title('Shock Breakout Time vs Angle')
@@ -75,7 +75,7 @@ plt.legend()
 
 
 plt.figure(figsize=(10, 6))
-plt.plot(data['breakout_time']*c, data['radius'], marker='o', label='Shock Speed', color = 'black')
+plt.scatter(data['breakout_time']*c, data['radius'], marker='o', label='Shock Speed', color = 'black')
 plt.xlabel('Breakout Time (ct)')
 plt.ylabel(r'$R_{star}$')
 plt.title('Shock Breakout Time vs Radius')
@@ -83,9 +83,9 @@ plt.grid(True)
 
 
 # Now take the derivative of this curve to get the speed
-data['shock_speed'] = np.gradient(data['breakout_time'], data.index)
+data['shock_speed'] = np.gradient(data['breakout_time'], data.index * np.pi / 180)  # Convert angle to radians for derivative
 plt.figure(figsize=(10, 6))
-plt.plot(data.index, 1/data['shock_speed'], marker='o', label='Shock Speed', color = 'blue')
+plt.scatter(data.index, (1/data['shock_speed']), marker='o', label='Shock Speed', color = 'blue')
 plt.xlabel('Angle (degrees)')
 plt.ylabel(r'Shock Speed $\frac{R_*}{dt_{bo}/d\theta}$')
 plt.title('Shock Speed vs Angle')
