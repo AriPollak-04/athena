@@ -85,7 +85,7 @@ plt.grid(True)
 # Now take the derivative of this curve to get the speed
 data['shock_speed'] = np.gradient(data['breakout_time'], data.index * np.pi / 180)  # Convert angle to radians for derivative
 plt.figure(figsize=(10, 6))
-plt.scatter(data.index, (1/data['shock_speed']), marker='o', label='Shock Speed', color = 'blue')
+plt.scatter(data['breakout_time'], (1/data['shock_speed']), marker='o', label='Shock Speed', color = 'blue')
 plt.xlabel('Angle (degrees)')
 plt.ylabel(r'Shock Speed $\frac{R_*}{dt_{bo}/d\theta}$')
 plt.title('Shock Speed vs Angle')
