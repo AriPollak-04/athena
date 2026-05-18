@@ -99,9 +99,12 @@ amr_e_ref = 0.0
 
 
 
-# FOR TRACKING SHOCK BREAKOUT
-breakout_nbins       = 90     # angular bins over [0, pi/2]
-breakout_factor      = 10.0   # p(cell) > factor * pamb triggers breakout
-breakout_vmin        = 0.01   # radial speed threshold for robustness
-
-breakout_ring_width = 3e-2
+# FOR CONTINUOUS SHOCK FRONT TRACKING
+shock_dt_log      = 0.001    # log cadence (match out1 dt)
+shock_nbins       = 180      # angular bins over [0, 360 deg]
+shock_nr          = 512      # radial bins
+shock_r_min       = 1e-3     # min radius for shock tracking
+shock_r_max       = 1.5
+shock_peak_height = 100.0    # min |d log10(S)/dr| for a peak
+shock_peak_dist   = 10       # min bin separation between peaks
+shock_max_dist    = 0.3      # max distance from outermost peak to keep
