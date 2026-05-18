@@ -88,11 +88,13 @@ plt.figure(figsize=(10, 6))
 plt.scatter(data['breakout_time'], (1/data['shock_speed']), marker='o', label='Shock Speed', color = 'blue')
 plt.xlabel('Angle (degrees)')
 plt.ylabel(r'Shock Speed $\frac{R_*}{dt_{bo}/d\theta}$')
+plt.yscale('log')
 plt.title('Shock Speed vs Angle')
 plt.grid(True)
 plt.legend()
 
 # %%
+
 
 #plot R vs angle with time as color in polar plot [0, 90]
 plt.figure(figsize=(10, 10))
@@ -104,5 +106,28 @@ ax.set_thetamax(90)
 plt.colorbar(sc, label='Breakout Time')
 ax.set_xlabel('Radius')
 plt.title('Shock Breakout Radius vs Angle')
+plt.grid(True)
+
+# Polar quiver plot of velocity vectors at shock surface
+plt.figure(figsize=(10, 10))
+ax = plt.subplot(111, projection='polar')
+
+theta = np.deg2rad(data.index.values.astype(float))
+r = data['radius'].values
+vr = data['vr'].values
+v_tang = data['v_tang'].values
+
+# Convert (vr, v_tang) in polar basis to Cartesian for quiver
+u = vr * np.cos(theta) - v_tang * np.sin(theta)
+v = vr * np.sin(theta) + v_tang * np.cos(theta)
+
+speed = np.sqrt(vr**2 + v_tang**2)
+qv = ax.quiver(theta, r, u, v, speed, cmap='plasma',
+               angles='xy', scale_units='xy', scale=0.2)
+plt.colorbar(qv, label='Speed |v|')
+ax.set_thetamin(0)
+ax.set_thetamax(90)
+ax.set_rmax(data['radius'].max() * 1.2)
+plt.title('Velocity Vectors at Shock Surface')
 plt.grid(True)
 # %%

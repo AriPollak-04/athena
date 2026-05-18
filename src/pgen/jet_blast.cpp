@@ -749,7 +749,7 @@ void Mesh::UserWorkInLoop() {
     if (Globals::my_rank == 0) {
       FILE* f = std::fopen("shock_breakout.csv", "w");
       if (f) {
-        std::fprintf(f, "angle_deg,radius,breakout_time\n");
+        std::fprintf(f, "angle_deg,radius,breakout_time,pratio,vr,v_tang\n");
         std::fclose(f);
       }
     }
@@ -994,8 +994,9 @@ void Mesh::UserWorkInLoop() {
   const Real phi0_rad = breakout_phi0_deg * (M_PI/180.0);
 
   std::vector<Real> pmax_bin(nbins, -1.0);   // max p/pamb in each bin this step
-  std::vector<Real> vrmax_bin(nbins, -1.0);  // max outward vr in each bin this step
-  std::vector<Real> rmax_bin(nbins, -1.0);   // radius of the cell with max p/pamb
+  std::vector<Real> vrmax_bin(nbins, -1.0);  // radial vel of the pmax cell this step
+  std::vector<Real> vtmax_bin(nbins, -2.0);  // tangential vel of the pmax cell this step
+  std::vector<Real> rmax_bin(nbins, -1.0);   // radius of the pmax cell this step
 
   for (int nb=0; nb<nblocal; ++nb) {
     MeshBlock* pmb = my_blocks(nb);
@@ -1005,6 +1006,9 @@ void Mesh::UserWorkInLoop() {
         for (int i=pmb->is; i<=pmb->ie; ++i) {
           Real x, y, z; cell_to_cart(pmb, k, j, i, x, y, z);
           Real dx = x - x0c, dy = y - y0c, dz = z - z0c;
+          // In 2D slabs (single k-layer), the dummy z-coordinate is not at the star center;
+          // collapse it to zero so rad is the true in-plane distance (matches jet driving code).
+          if (pmb->ks == pmb->ke) dz = 0.0;
           Real rad = std::sqrt(dx*dx + dy*dy + dz*dz);
           // Symmetric shell centered on rout
           if (std::fabs(rad - rout) > ringw) continue;
@@ -1020,24 +1024,30 @@ void Mesh::UserWorkInLoop() {
           int b = static_cast<int>( (phi_rel / (0.5*M_PI)) * nbins );
           if (b >= nbins) b = nbins-1;
 
-          // Accumulate ambient pressure at t<=0 (average over all cells per bin)
-          if (time <= 0.0) {
+          // Accumulate ambient pressure at t<=0 from inside-star cells only; exterior cells
+          // carry floor pressure (1e-25) which would pull the reference down artificially.
+          if (time <= 0.0 && rad < rout) {
             pamb_sum[b] += w(IPR, k, j, i);
             pamb_cnt[b] += 1;
           }
 
-          // For detection at t>0: track per-bin max pressure ratio and outward velocity
+          // For detection at t>0: track per-bin max pressure ratio together with the vr
+          // and radius of that same cell so all logged quantities are co-located.
           if (pamb_finalized && t_break[b] < 0.0) {
             Real pamb = (pamb_bin[b] > 0.0) ? pamb_bin[b] : 1.0e-30;
             Real p = w(IPR, k, j, i);
             Real pratio = p / pamb;
-            if (pratio > pmax_bin[b]) { pmax_bin[b] = pratio; rmax_bin[b] = rad; }
-
-            // Convert native velocities to Cartesian, then project onto radial direction
-            Real cvx, cvy, cvz;
-            native_vel_to_cart(pmb, k, j, i, x, y, z, cvx, cvy, cvz);
-            Real vr = (rad > 0.0) ? (dx*cvx + dy*cvy + dz*cvz)/rad : 0.0;
-            if (vr > vrmax_bin[b]) vrmax_bin[b] = vr;
+            if (pratio > pmax_bin[b]) {
+              // Convert native velocities to Cartesian, then project onto radial direction
+              Real cvx, cvy, cvz;
+              native_vel_to_cart(pmb, k, j, i, x, y, z, cvx, cvy, cvz);
+              Real vr     = (rad > 0.0) ? ( dx*cvx +  dy*cvy + dz*cvz)/rad : 0.0;
+              Real v_tang = (rad > 0.0) ? (-dy*cvx +  dx*cvy          )/rad : 0.0;
+              pmax_bin[b]  = pratio;
+              vrmax_bin[b] = vr;
+              vtmax_bin[b] = v_tang;
+              rmax_bin[b]  = rad;
+            }
           }
         }
       }
@@ -1049,13 +1059,19 @@ void Mesh::UserWorkInLoop() {
 #ifdef MPI_PARALLEL
     // Save local pmax before the global reduction so we can identify the winning rank.
     std::vector<Real> local_pmax(pmax_bin);
-    MPI_Allreduce(MPI_IN_PLACE, pmax_bin.data(),  nbins, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE, vrmax_bin.data(), nbins, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
-    // Only the rank(s) that held the global pmax contribute their radius; others zero out.
+    MPI_Allreduce(MPI_IN_PLACE, pmax_bin.data(), nbins, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+    // Only the rank that held the global pmax contributes its radius and vr (all three
+    // quantities come from the same cell, so they must travel together).
     for (int b = 0; b < nbins; ++b) {
-      if (local_pmax[b] < pmax_bin[b]) rmax_bin[b] = -1.0;
+      if (local_pmax[b] < pmax_bin[b]) {
+        rmax_bin[b]  = -1.0;
+        vrmax_bin[b] = -1.0;
+        vtmax_bin[b] = -2.0;
+      }
     }
-    MPI_Allreduce(MPI_IN_PLACE, rmax_bin.data(), nbins, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, rmax_bin.data(),  nbins, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, vrmax_bin.data(), nbins, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, vtmax_bin.data(), nbins, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
 #endif
 
     if (Globals::my_rank == 0) {
@@ -1069,7 +1085,9 @@ void Mesh::UserWorkInLoop() {
           if (f) {
             Real phi_center_deg = ((static_cast<Real>(b) + 0.5) * 90.0 / static_cast<Real>(nbins));
             Real r_detected = (rmax_bin[b] > 0.0) ? rmax_bin[b] : rout;
-            std::fprintf(f, "%g,%g,%g\n", phi_center_deg, r_detected, t_break[b]);
+            std::fprintf(f, "%g,%g,%g,%g,%g,%g\n",
+                         phi_center_deg, r_detected, t_break[b],
+                         pmax_bin[b], vrmax_bin[b], vtmax_bin[b]);
           }
         }
       }
