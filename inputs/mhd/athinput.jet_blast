@@ -72,10 +72,10 @@ poly_csv_path = /scratch/aripoll/athena/polytrope_n3.00.csv
 cs_factor = 1e-6
 phi0            = 0
 theta_0         = 0.174533
-t_stop        = 0.6
+t_stop        = 1
 jet_rinj      = 0.1
 jet_Gam       = 20
-jet_rho       = 4.5e-2
+jet_rho       = 0.014
 jet_p         = 1e-6
 
 
