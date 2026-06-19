@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=192
-#SBATCH --time=12:00:00
+#SBATCH --time=18:00:00
 #SBATCH --job-name=ars
 #SBATCH --output=/scratch/aripoll/athena_out/outputs/ars.out
 #SBATCH --mail-user=ari.pollak@mail.utoronto.ca

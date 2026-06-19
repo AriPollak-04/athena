@@ -349,7 +349,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   if (Globals::my_rank == 0) {
     FILE* fcsv = std::fopen("shock_front.csv", "w");
     if (fcsv) {
-      std::fprintf(fcsv, "time,angle_deg,r_shock,vr,v_tang\n");
+      std::fprintf(fcsv, "time,angle_deg,r_shock,vr,v_tang,mushroom\n");
       std::fclose(fcsv);
     }
   }
@@ -965,13 +965,21 @@ void Mesh::UserWorkInLoop() {
         }
 
         Real angle_deg = ((Real)bi + 0.5) * 360.0 / (Real)nb_ang;
+        bool has_surface = false, has_outer = false;
+        for (int pi : selected) {
+          Real rv = r_of(pi);
+          if (rv > 0.95 && rv < 1.05) has_surface = true;
+          if (rv > 1.05)              has_outer   = true;
+        }
+        int mushroom = (has_surface && has_outer) ? 1 : 0;
         for (int pi : selected) {
           int idx = bi*nr + pi;
-          std::fprintf(f, "%.6g,%.4g,%.6g,%.6g,%.6g\n",
+          std::fprintf(f, "%.6g,%.4g,%.6g,%.6g,%.6g,%d\n",
             (double)time, (double)angle_deg,
             (double)r_of(pi),
             (double)(vr_sum[idx]/cnt[idx]),
-            (double)(vt_sum[idx]/cnt[idx]));
+            (double)(vt_sum[idx]/cnt[idx]),
+            mushroom);
         }
       }
       std::fclose(f);
