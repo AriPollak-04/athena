@@ -21,7 +21,7 @@ install_name_tool -add_rpath "$CONDA_PREFIX/lib"  ~/athena/bin/athena
 
 cp ~/athena/inputs/mhd/athinput.{name} .
 install_name_tool -add_rpath "$CONDA_PREFIX/lib"  ~/athena/bin/athena  
-~/athena/bin/athena -i athinput.bw
+mpiexec -n 8 ~/athena/bin/athena -i athinput.jet_blast
 
 
 # for python plotting "gr shock tube"

@@ -54,6 +54,9 @@ static PolytropeData LoadPolytropeCSV(const std::string &filename) {
 }
 
 // Athena++ headers
+#ifdef MPI_PARALLEL
+#include <mpi.h>
+#endif
 #include "../athena.hpp"
 #include "../athena_arrays.hpp"
 #include "../coordinates/coordinates.hpp"
@@ -62,6 +65,7 @@ static PolytropeData LoadPolytropeCSV(const std::string &filename) {
 #include "../globals.hpp"
 #include "../hydro/hydro.hpp"
 #include "../mesh/mesh.hpp"
+#include "../scalars/scalars.hpp"
 
 #include "../parameter_input.hpp"
 
@@ -83,14 +87,18 @@ static int  amr_mode = 0;
 // Optional energy scale used in hybrid mode (if <=0, energy is ignored)
 static Real amr_e_ref = 0.0;
 
-// --- breakout tracking (configured in InitUserMeshData) ---
-static Real breakout_rout, breakout_x1_0, breakout_x2_0, breakout_x3_0;
-static int  breakout_nbins;
-static Real breakout_factor, breakout_vmin;
-// If <=0, we auto-compute ~2 * finest dx on first call
-static Real breakout_ringw;
-static bool breakout_params_inited = false;
-static Real breakout_phi0_deg;
+// --- continuous shock front tracking (configured in InitUserMeshData) ---
+static Real shock_x1_0 = 0.0, shock_x2_0 = 0.0, shock_x3_0 = 0.0;
+static int  shock_nbins_g       = 180;   // angular bins over [0, 2pi]
+static Real shock_dt_log_g      = 0.1;   // log cadence (same units as time)
+static Real shock_r_min_g       = 0.0;
+static Real shock_r_max_g       = 2.0;
+static int  shock_nr_g          = 512;   // radial bins
+static Real shock_peak_height_g = 100.0; // min |d log10(S)/dr| for a peak
+static int  shock_peak_dist_g   = 10;    // min separation between peaks in bins
+static Real shock_max_dist_g    = 0.3;   // max distance from outermost peak to keep
+static Real shock_t_last        = -1e99;
+static bool shock_params_inited = false;
 // --- jet driving parameters ---
 static Real jet_t_stop = 0.0;      // stop time for driving
 static Real jet_rinj   = 0.0;      // injection radius (nozzle size)
@@ -326,16 +334,25 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   }
 
 
-  // Breakout tracker inputs (available to UserWorkInLoop without a pin)
-  breakout_rout   = pin->GetReal("problem", "star_radius");
-  breakout_x1_0   = pin->GetOrAddReal("problem", "x1_0", 0.0);
-  breakout_x2_0   = pin->GetOrAddReal("problem", "x2_0", 0.0);
-  breakout_x3_0   = pin->GetOrAddReal("problem", "x3_0", 0.0);
-  breakout_nbins  = pin->GetOrAddInteger("problem", "breakout_nbins", 90);   // bins over [0, 90 deg]
-  breakout_factor = pin->GetOrAddReal("problem", "breakout_factor", 10.0);   // p > factor * pamb
-  breakout_vmin   = pin->GetOrAddReal("problem", "breakout_vmin", 0.01);     // outward vr threshold
-  breakout_ringw  = pin->GetOrAddReal("problem", "breakout_ring_width", -1.0); // auto if <= 0
-  breakout_phi0_deg = pin->GetOrAddReal("problem", "breakout_phi0_deg", 0.0); // rotate ring coords
+  // Shock front tracker inputs
+  shock_x1_0          = pin->GetOrAddReal("problem", "x1_0", 0.0);
+  shock_x2_0          = pin->GetOrAddReal("problem", "x2_0", 0.0);
+  shock_x3_0          = pin->GetOrAddReal("problem", "x3_0", 0.0);
+  shock_nbins_g       = pin->GetOrAddInteger("problem", "shock_nbins", 180);
+  shock_dt_log_g      = pin->GetOrAddReal("problem", "shock_dt_log", 0.1);
+  shock_r_min_g       = pin->GetOrAddReal("problem", "shock_r_min", 0.0);
+  shock_r_max_g       = pin->GetOrAddReal("problem", "shock_r_max", 2.0);
+  shock_nr_g          = pin->GetOrAddInteger("problem", "shock_nr", 512);
+  shock_peak_height_g = pin->GetOrAddReal("problem", "shock_peak_height", 100.0);
+  shock_peak_dist_g   = pin->GetOrAddInteger("problem", "shock_peak_dist", 10);
+  shock_max_dist_g    = pin->GetOrAddReal("problem", "shock_max_dist", 0.3);
+  if (Globals::my_rank == 0) {
+    FILE* fcsv = std::fopen("shock_front.csv", "w");
+    if (fcsv) {
+      std::fprintf(fcsv, "time,angle_deg,r_shock,vr,v_tang,mushroom\n");
+      std::fclose(fcsv);
+    }
+  }
   // Jet driving inputs (optional)
   jet_t_stop = pin->GetOrAddReal("problem", "t_stop", 0.0);
   jet_rinj   = pin->GetOrAddReal("problem", "jet_rinj", 0.0);
@@ -366,7 +383,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
       (double)jet_rho, (double)jet_p,
       (double)gate_theta0, (double)gate_phi0);
   }
-  breakout_params_inited = true;
+  shock_params_inited = true;
   return;
 }
 
@@ -436,6 +453,8 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   }
 
 
+  bool is2d = (ks == ke); // true for 2D runs (single zone in x3)
+
   // setup uniform ambient medium with spherical over-pressured region
   for (int k=ks; k<=ke; k++) {
     for (int j=js; j<=je; j++) {
@@ -451,7 +470,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
           x = pcoord->x1v(i)*std::cos(pcoord->x2v(j));
           y = pcoord->x1v(i)*std::sin(pcoord->x2v(j));
-          z = pcoord->x3v(k);
+          z = is2d ? z0 : pcoord->x3v(k);  // 2D slab: collapse to equatorial plane
           rad = std::sqrt(SQR(x - x0) + SQR(y - y0) + SQR(z - z0));
         } else { // if (std::strcmp(COORDINATE_SYSTEM, "spherical_polar") == 0)
           x = pcoord->x1v(i)*std::sin(pcoord->x2v(j))*std::cos(pcoord->x3v(k));
@@ -487,8 +506,8 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
               pgas0 = P_arr[idx-1]   + t * (P_arr[idx]   - P_arr[idx-1]);
             }
           } else {
-            rho0  = 1.0e-19;
-            pgas0 = 1.0e-19;
+            rho0  = 1.0e-25;
+            pgas0 = 1.0e-25;
           }
         }
 
@@ -561,6 +580,45 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         // diagnostic: v^2 sanity
         if (!std::isfinite(v2)) nan_v2++;
         #endif
+        // Create angle_ok gate for passive scalar injection (mirrors UserWorkInLoop)
+        bool angle_ok = true;
+        if (jet_enabled) {
+          Real xloc = x - x0;
+          Real yloc = y - y0;
+          Real zloc = z - z0;
+          Real phi_dir = std::atan2(yloc, xloc);
+          if (phi_dir < 0.0) phi_dir += 2.0*M_PI;
+
+          if (is2d && std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+            auto wrap_pm_pi = [](Real a)->Real { a = std::fmod(a + M_PI, 2.0*M_PI); if (a < 0.0) a += 2.0*M_PI; return a - M_PI; };
+            Real dphi = wrap_pm_pi(phi_dir - gate_phi0);
+            angle_ok = (std::fabs(dphi) <= gate_theta0) || (std::fabs(dphi) >= M_PI - gate_theta0);
+          } else if (is2d && std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+            auto wrap_pm_pi = [](Real a)->Real { a = std::fmod(a + M_PI, 2.0*M_PI); if (a < 0.0) a += 2.0*M_PI; return a - M_PI; };
+            Real dphi = wrap_pm_pi(phi_dir - gate_phi0);
+            angle_ok = (std::fabs(dphi) <= gate_theta0) || (std::fabs(dphi) >= M_PI - gate_theta0);
+          } else {
+            // 3D: bipolar cone check using position relative to center
+            Real ct_dir = (rad > 0.0) ? (zloc / rad) : 1.0;
+            ct_dir = std::max((Real)-1.0, std::min((Real)1.0, ct_dir));
+            Real theta_dir = std::acos(ct_dir);
+            angle_ok = (theta_dir <= gate_theta0) || (theta_dir >= M_PI - gate_theta0);
+          }
+        }
+
+
+
+        // Initialize passive scalar: r=1 inside jet nozzle (rad <= jet_rinj AND angle gate), r=0 elsewhere
+        if (NSCALARS > 0) {
+          for (int n = 0; n < NSCALARS; ++n) {
+            pscalars->s(n,k,j,i) = 0.0;
+            pscalars->r(n,k,j,i) = 0.0;
+            if (angle_ok && rad <= jet_rinj) {
+              pscalars->s(n,k,j,i) = rho; // s = rho * r, r=1
+              pscalars->r(n,k,j,i) = 1.0;
+            }
+          }
+        }
 
       }
     }
@@ -647,295 +705,288 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 //!       Track shock breakout times at r≈star_radius for angles in [0, 90°] and log CSV.
 //========================================================================================
 void Mesh::UserWorkInLoop() {
-  // Ensure parameters were cached
-  if (!breakout_params_inited) return;
+  if (!shock_params_inited) return;
 
-  // Determine a default ring width ~ 2 * local finest dx, lazily on first call
-  static Real ringw_default = -1.0;
-  if (ringw_default < 0.0 && nblocal > 0) {
-    MeshBlock *pmb0 = my_blocks(0);
-    Real dx1 = pmb0->pcoord->dx1f(pmb0->is);
-    Real dx2 = pmb0->pcoord->dx2f(pmb0->js);
-    Real dx3 = pmb0->pcoord->dx3f(pmb0->ks);
-    ringw_default = 2.0 * std::max(dx1, std::max(dx2, dx3));
-  }
-  const Real rout   = breakout_rout;
-  const Real x1_0   = breakout_x1_0;
-  const Real x2_0   = breakout_x2_0;
-  const Real x3_0   = breakout_x3_0;
-  const int  nbins  = breakout_nbins;
-  const Real factor = breakout_factor;
-  const Real vmin   = breakout_vmin;
-  const Real ringw  = (breakout_ringw > 0.0) ? breakout_ringw
-                                             : (ringw_default > 0.0 ? ringw_default : 1e-2);
-
-  // Compute breakout center in Cartesian coordinates for coordinate-agnostic math
+  // Origin in Cartesian
   Real x0c, y0c, z0c;
   if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-    x0c = breakout_x1_0; y0c = breakout_x2_0; z0c = breakout_x3_0;
+    x0c = shock_x1_0; y0c = shock_x2_0; z0c = shock_x3_0;
   } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-    Real R0 = breakout_x1_0, ph0 = breakout_x2_0, z0 = breakout_x3_0;
-    x0c = R0*std::cos(ph0); y0c = R0*std::sin(ph0); z0c = z0;
-  } else { // spherical_polar
-    Real r0 = breakout_x1_0, th0 = breakout_x2_0, ph0 = breakout_x3_0;
-    x0c = r0*std::sin(th0)*std::cos(ph0);
-    y0c = r0*std::sin(th0)*std::sin(ph0);
-    z0c = r0*std::cos(th0);
+    x0c = shock_x1_0*std::cos(shock_x2_0);
+    y0c = shock_x1_0*std::sin(shock_x2_0);
+    z0c = shock_x3_0;
+  } else {
+    x0c = shock_x1_0*std::sin(shock_x2_0)*std::cos(shock_x3_0);
+    y0c = shock_x1_0*std::sin(shock_x2_0)*std::sin(shock_x3_0);
+    z0c = shock_x1_0*std::cos(shock_x2_0);
   }
 
-  // Static state across calls: per-bin breakout time and ambient reference
-  static bool inited = false;
-  static std::vector<Real> t_break;     // breakout time per bin (or <0 if unknown)
-  static std::vector<Real> pamb_bin;    // ambient reference pressure per bin (sampled at t=0)
-  static std::vector<int>  logged;      // whether we've already written the line for a bin
-
-  // Initialize on first entry or if nbins changed
-  if (!inited || (int)t_break.size() != nbins) {
-    t_break.assign(nbins, -1.0);
-    pamb_bin.assign(nbins, -1.0);
-    logged.assign(nbins, 0);
-    inited = true;
-    if (Globals::my_rank == 0) {
-      // Create/overwrite CSV with a header
-      FILE* f = std::fopen("shock_breakout.csv", "w");
-      if (f) {
-        std::fprintf(f, "angle_deg,radius,breakout_time\n");
-        std::fclose(f);
-      }
-    }
-  }
-
-  // Helper to convert cell center to Cartesian
-  auto cell_to_cart = [&](MeshBlock* pmb, int k, int j, int i, Real &x, Real &y, Real &z){
+  auto cell_to_cart = [&](MeshBlock* pmb, int k, int j, int i, Real &x, Real &y, Real &z) {
     if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-      x = pmb->pcoord->x1v(i);
-      y = pmb->pcoord->x2v(j);
-      z = pmb->pcoord->x3v(k);
+      x = pmb->pcoord->x1v(i); y = pmb->pcoord->x2v(j); z = pmb->pcoord->x3v(k);
     } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-      Real R = pmb->pcoord->x1v(i);
-      Real ph = pmb->pcoord->x2v(j);
+      Real R = pmb->pcoord->x1v(i), ph = pmb->pcoord->x2v(j);
       x = R*std::cos(ph); y = R*std::sin(ph); z = pmb->pcoord->x3v(k);
-    } else { // spherical_polar
-      Real r  = pmb->pcoord->x1v(i);
-      Real th = pmb->pcoord->x2v(j);
-      Real ph = pmb->pcoord->x3v(k);
-      x = r*std::sin(th)*std::cos(ph);
-      y = r*std::sin(th)*std::sin(ph);
-      z = r*std::cos(th);
+    } else {
+      Real r = pmb->pcoord->x1v(i), th = pmb->pcoord->x2v(j), ph = pmb->pcoord->x3v(k);
+      x = r*std::sin(th)*std::cos(ph); y = r*std::sin(th)*std::sin(ph); z = r*std::cos(th);
     }
   };
 
-  // --- Jet driving: enforce jet state inside a small nozzle while time <= t_stop ---
-  if (jet_enabled && (time <= jet_t_stop)) {
-    // ---- debug counters (per-step, local to this rank) ----
-    int dbg_in_rad = 0;        // cells with rad <= jet_rinj (geometric nozzle)
-    int dbg_angle_ok = 0;      // cells that also pass the angle/wedge gate
-    int dbg_written = 0;       // cells actually overwritten with jet state
+  auto native_vel_to_cart = [&](MeshBlock* pmb, int k, int j, int i,
+                                Real, Real, Real, Real &vx, Real &vy, Real &vz) {
+    Real v1 = pmb->phydro->w(IVX,k,j,i);
+    Real v2 = pmb->phydro->w(IVY,k,j,i);
+    Real v3 = pmb->phydro->w(IVZ,k,j,i);
+    if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
+      vx = v1; vy = v2; vz = v3;
+    } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
+      Real ph = pmb->pcoord->x2v(j);
+      vx = v1*std::cos(ph) - v2*std::sin(ph);
+      vy = v1*std::sin(ph) + v2*std::cos(ph);
+      vz = v3;
+    } else {
+      Real th = pmb->pcoord->x2v(j), ph = pmb->pcoord->x3v(k);
+      Real sth = std::sin(th), cth = std::cos(th), sph = std::sin(ph), cph = std::cos(ph);
+      vx = v1*sth*cph + v2*cth*cph - v3*sph;
+      vy = v1*sth*sph + v2*cth*sph + v3*cph;
+      vz = v1*cth - v2*sth;
+    }
+  };
 
+  // ---- Jet driving: enforce jet state inside nozzle while time <= t_stop ----
+  if (jet_enabled && (time <= jet_t_stop)) {
     for (int nb=0; nb<nblocal; ++nb) {
       MeshBlock* pmb = my_blocks(nb);
-      auto &coord = *pmb->pcoord;
       AthenaArray<Real> &w = pmb->phydro->w;
       AthenaArray<Real> &u = pmb->phydro->u;
       for (int k=pmb->ks; k<=pmb->ke; ++k) {
         for (int j=pmb->js; j<=pmb->je; ++j) {
           for (int i=pmb->is; i<=pmb->ie; ++i) {
-            // Cartesian position of cell center (independent of native mesh coordinates)
             Real x, y, z; cell_to_cart(pmb, k, j, i, x, y, z);
             Real dx = x - x0c, dy = y - y0c, dz = z - z0c;
-            bool is2d_local = (pmb->ks == pmb->ke);
-            // In 2D runs (single zone in x3), treat the nozzle radius as in-plane (ignore dz)
-            if (is2d_local) {
-              dz = 0.0;           // collapse the slab
-              z  = z0c;           // set to center for downstream angle calcs
-            }
+            bool is2d = (pmb->ks == pmb->ke);
+            if (is2d) { dz = 0.0; z = z0c; }
             Real rad = std::sqrt(dx*dx + dy*dy + dz*dz);
-            if (rad > jet_rinj) {
-              continue; // outside geometric nozzle
-            } else {
-              ++dbg_in_rad; // count geometric nozzle cells
-            }
+            if (rad > jet_rinj) continue;
 
-            // Compute gate angles analogous to ProblemGenerator
-            bool is2d = is2d_local;
-            bool angle_ok = true;
-            // Angles from Cartesian position relative to breakout center (coordinate-agnostic)
-            Real zloc = z - z0c;
-            Real ct_dir;
-            if (is2d) {
-              // In 2D slices, define theta_dir = π/2 so gating falls back to φ only (as intended)
-              ct_dir = 0.0;
-            } else {
-              ct_dir = (rad > 0.0) ? (zloc / rad) : 1.0; // cos(theta)
-            }
+            Real zloc = z - z0c, xloc = x - x0c, yloc = y - y0c;
+            Real ct_dir = is2d ? 0.0 : ((rad > 0.0) ? (zloc/rad) : 1.0);
             ct_dir = std::max((Real)-1.0, std::min((Real)1.0, ct_dir));
             Real theta_dir = std::acos(ct_dir);
-            Real xloc = x - x0c;
-            Real yloc = y - y0c;
             Real phi_dir = std::atan2(yloc, xloc);
             if (phi_dir < 0.0) phi_dir += 2.0*M_PI;
 
-            if (is2d && std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-              auto wrap_pm_pi = [](Real a)->Real { a = std::fmod(a + M_PI, 2.0*M_PI); if (a < 0.0) a += 2.0*M_PI; return a - M_PI; };
+            bool angle_ok = true;
+            if (is2d && (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0 ||
+                         std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0)) {
+              auto wrap_pm_pi = [](Real a)->Real {
+                a = std::fmod(a + M_PI, 2.0*M_PI); if (a < 0.0) a += 2.0*M_PI; return a - M_PI;
+              };
               Real dphi = wrap_pm_pi(phi_dir - gate_phi0);
               angle_ok = (std::fabs(dphi) <= gate_theta0) || (std::fabs(dphi) >= M_PI - gate_theta0);
-            }
-            else if (is2d && std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-              auto wrap_pm_pi = [](Real a)->Real { a = std::fmod(a + M_PI, 2.0*M_PI); if (a < 0.0) a += 2.0*M_PI; return a - M_PI; };
-              Real dphi = wrap_pm_pi(phi_dir - gate_phi0);
-              angle_ok = (std::fabs(dphi) <= gate_theta0) || (std::fabs(dphi) >= M_PI - gate_theta0);
-            }
-            else {
+            } else {
               angle_ok = (theta_dir <= gate_theta0) || (theta_dir >= M_PI - gate_theta0);
             }
+            if (!angle_ok) continue;
 
-            if (!angle_ok) {
-              continue;
-            } else {
-              ++dbg_angle_ok; // inside nozzle AND angle gate
-            }
-
-            // Enforce jet state: density, pressure, and velocity (purely radial)
             Real beta = 0.0;
-            if (jet_Gam > 1.0) {
-              Real invG2 = 1.0/(jet_Gam*jet_Gam);
-              beta = std::sqrt(std::max(0.0, 1.0 - invG2));
-            }
-            // Spherical angles from Cartesian position (works for all coordinate systems)
-            Real ct;
-            if (is2d) {
-              ct = 0.0; // theta = π/2 in 2D slice → purely in-plane
-            } else {
-              ct = (rad>0.0) ? ((z - z0c) / rad) : 1.0;  // cos(theta)
-            }
+            if (jet_Gam > 1.0) beta = std::sqrt(std::max(0.0, 1.0 - 1.0/(jet_Gam*jet_Gam)));
+            Real ct = is2d ? 0.0 : ((rad > 0.0) ? ((z - z0c)/rad) : 1.0);
             ct = std::max((Real)-1.0, std::min((Real)1.0, ct));
             Real th = std::acos(ct);
             Real ph = std::atan2(y - y0c, x - x0c);
-            // Unit vector e_r in Cartesian
-            Real sth = std::sin(th), cth = std::cos(th);
-            Real cph = std::cos(ph),  sph = std::sin(ph);
+            Real sth = std::sin(th), cth = std::cos(th), cph = std::cos(ph), sph = std::sin(ph);
             Real erx = sth*cph, ery = sth*sph, erz = cth;
-            // Purely radial velocity in Cartesian
-            Real vx = beta * erx;
-            Real vy = beta * ery;
-            Real vz = beta * erz;
+            Real vx = beta*erx, vy = beta*ery, vz = beta*erz;
 
-            // Map Cartesian (vx,vy,vz) to native mesh-basis velocity components (v1,v2,v3)
             Real v1, v2c, v3;
             if (std::strcmp(COORDINATE_SYSTEM, "cartesian") == 0) {
-              v1 = vx;
-              v2c = vy;
-              v3 = vz;
+              v1 = vx; v2c = vy; v3 = vz;
             } else if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-              // native basis is (v_R, v_phi, v_z); phi is the azimuth of this cell
-              // Use the same φ we computed above for position
-              Real vR   =  vx*std::cos(ph) + vy*std::sin(ph);
-              Real vphi = -vx*std::sin(ph) + vy*std::cos(ph);
-              v1 = vR; v2c = vphi; v3 = vz;
-            } else { // spherical_polar: native basis is (v_r, v_theta, v_phi)
-              // Orthonormal basis at (th, ph):
-              // e_r     = (sinθ cosφ, sinθ sinφ, cosθ)  == (erx, ery, erz)
-              // e_theta = (cosθ cosφ, cosθ sinφ, -sinθ)
-              // e_phi   = (-sinφ, cosφ, 0)
+              v1  =  vx*std::cos(ph) + vy*std::sin(ph);
+              v2c = -vx*std::sin(ph) + vy*std::cos(ph);
+              v3  = vz;
+            } else {
               Real etx = cth*cph, ety = cth*sph, etz = -sth;
-              Real ephx = -sph,   ephy =  cph,   ephz = 0.0;
-              Real vr   = vx*erx + vy*ery + vz*erz;
-              Real vth  = vx*etx + vy*ety + vz*etz;
-              Real vph  = vx*ephx + vy*ephy + vz*ephz;
-              v1 = vr; v2c = vth; v3 = vph;
+              Real ephx = -sph, ephy = cph, ephz = 0.0;
+              v1  = vx*erx  + vy*ery  + vz*erz;
+              v2c = vx*etx  + vy*ety  + vz*etz;
+              v3  = vx*ephx + vy*ephy + vz*ephz;
             }
 
-            // Write primitives in native basis
-            Real rho = std::max(jet_rho, (Real)1e-30); //define a 1/r^2 rho profile? Define the density using luminosity and lorentz factor
-            Real pgas = std::max(jet_p, (Real)1e-30);
-            w(IDN,k,j,i) = rho;
-            w(IPR,k,j,i) = pgas;
-            w(IVX,k,j,i) = v1;   // v^1
-            w(IVY,k,j,i) = v2c;  // v^2
-            w(IVZ,k,j,i) = v3;   // v^3
+            Real rho  = std::max(jet_rho, (Real)1e-30);
+            Real pgas = std::max(jet_p,   (Real)1e-30);
+            w(IDN,k,j,i) = rho; w(IPR,k,j,i) = pgas;
+            w(IVX,k,j,i) = v1; w(IVY,k,j,i) = v2c; w(IVZ,k,j,i) = v3;
 
 #if defined(RELATIVISTIC_DYNAMICS) && (RELATIVISTIC_DYNAMICS != 0)
-            // Consistent conserved variables (still scalar v^2 from physical speed)
             Real v2 = vx*vx + vy*vy + vz*vz; v2 = std::min(v2, 1.0 - 1e-12);
             Real gL = 1.0/std::sqrt(1.0 - v2);
-            Real gamma = pmb->peos->GetGamma();
-            Real h_spec  = 1.0 + (gamma/(gamma - 1.0)) * (pgas / rho);
-            u(IDN,k,j,i) = rho * gL;
-            u(IM1,k,j,i) = rho * h_spec * gL*gL * v1;
-            u(IM2,k,j,i) = rho * h_spec * gL*gL * v2c;
-            u(IM3,k,j,i) = rho * h_spec * gL*gL * v3;
-            Real tau  = rho * h_spec * gL*gL - pgas - rho * gL;
-            Real Etot = tau + rho * gL; // store Etot (include rest mass)
-            u(IEN,k,j,i) = Etot;
+            Real gamma_eos = pmb->peos->GetGamma();
+            Real h_spec = 1.0 + (gamma_eos/(gamma_eos - 1.0)) * (pgas/rho);
+            u(IDN,k,j,i) = rho*gL;
+            u(IM1,k,j,i) = rho*h_spec*gL*gL*v1;
+            u(IM2,k,j,i) = rho*h_spec*gL*gL*v2c;
+            u(IM3,k,j,i) = rho*h_spec*gL*gL*v3;
+            Real tau  = rho*h_spec*gL*gL - pgas - rho*gL;
+            u(IEN,k,j,i) = tau + rho*gL;
 #else
             Real v2mag = vx*vx + vy*vy + vz*vz;
             Real gm1 = pmb->peos->GetGamma() - 1.0;
             u(IDN,k,j,i) = rho;
-            u(IM1,k,j,i) = rho * v1;
-            u(IM2,k,j,i) = rho * v2c;
-            u(IM3,k,j,i) = rho * v3;
+            u(IM1,k,j,i) = rho*v1; u(IM2,k,j,i) = rho*v2c; u(IM3,k,j,i) = rho*v3;
             u(IEN,k,j,i) = pgas/gm1 + 0.5*rho*v2mag;
 #endif
-            // Count cells actually written with jet state this step
-            ++dbg_written;
           }
         }
       }
     }
   }
 
-  // Scan only cells within a thin spherical shell around r = rout, and angles in [0, 90 deg]
-  for (int nb=0; nb<nblocal; ++nb) {
-    MeshBlock* pmb = my_blocks(nb);
+  // ---- Continuous shock front tracking at shock_dt_log cadence ----
+  if (time - shock_t_last < shock_dt_log_g) return;
+
+  const int  nb_ang = shock_nbins_g;
+  const int  nr     = shock_nr_g;
+  const Real rmin   = shock_r_min_g;
+  const Real rmax   = shock_r_max_g;
+  const Real dr     = (rmax - rmin) / static_cast<Real>(nr);
+  const int  ps     = nb_ang * nr;   // total profile size
+
+  // Accumulation arrays: [angle_bin * nr + r_bin]
+  std::vector<Real> logS_sum(ps, 0.0), vr_sum(ps, 0.0), vt_sum(ps, 0.0), cnt(ps, 0.0);
+
+  for (int inb = 0; inb < nblocal; ++inb) {
+    MeshBlock* pmb = my_blocks(inb);
     AthenaArray<Real> &w = pmb->phydro->w;
-    for (int k=pmb->ks; k<=pmb->ke; ++k) {
-      for (int j=pmb->js; j<=pmb->je; ++j) {
-        for (int i=pmb->is; i<=pmb->ie; ++i) {
+    const Real gamma = pmb->peos->GetGamma();
+    for (int k = pmb->ks; k <= pmb->ke; ++k) {
+      for (int j = pmb->js; j <= pmb->je; ++j) {
+        for (int i = pmb->is; i <= pmb->ie; ++i) {
           Real x, y, z; cell_to_cart(pmb, k, j, i, x, y, z);
-          Real dx = x - x0c, dy = y - y0c, dz = z - z0c;
-          Real rad = std::sqrt(dx*dx + dy*dy + dz*dz);
-          if (rad <= rout || rad > rout + ringw) continue;  // only near the stellar surface
+          Real dx_c = x - x0c, dy_c = y - y0c, dz_c = z - z0c;
+          if (pmb->ks == pmb->ke) dz_c = 0.0;
+          Real rad = std::sqrt(dx_c*dx_c + dy_c*dy_c + dz_c*dz_c);
+          if (rad < rmin || rad >= rmax) continue;
+          int ri = static_cast<int>((rad - rmin) / dr);
+          if (ri < 0 || ri >= nr) continue;
 
-          // in-plane azimuth measured from +x, wrap to [0, 2pi)
-          Real phi = std::atan2(dy, dx);
+          // Full [0, 2pi) azimuthal binning
+          Real phi = std::atan2(dy_c, dx_c);
           if (phi < 0.0) phi += 2.0*M_PI;
-          const Real phi0 = breakout_phi0_deg * (M_PI/180.0); // center direction in radians
-          Real phi_rel = phi - phi0;
-          if (phi_rel < 0.0) phi_rel += 2.0*M_PI;
-          if (phi_rel >= 2.0*M_PI) phi_rel -= 2.0*M_PI;
-          if (phi_rel < 0.0 || phi_rel > (M_PI/2.0)) continue; // only angles in [0, 90 deg]
-          int b = static_cast<int>( (phi_rel / (0.5*M_PI)) * nbins );
-          if (b >= nbins) b = nbins-1;
+          int bi = static_cast<int>((phi / (2.0*M_PI)) * nb_ang);
+          if (bi < 0) bi = 0;
+          if (bi >= nb_ang) bi = nb_ang - 1;
 
-          // Establish ambient reference at t<=0
-          if (pamb_bin[b] < 0.0 && time <= 0.0) {
-            pamb_bin[b] = w(IPR, k, j, i);
-          }
+          Real rho = w(IDN,k,j,i), p = w(IPR,k,j,i);
+          if (rho <= 0.0 || p <= 0.0 || !std::isfinite(rho) || !std::isfinite(p)) continue;
+          Real S = p / std::pow(rho, gamma);
+          if (S <= 0.0 || !std::isfinite(S)) continue;
 
-          // If breakout not yet recorded, test condition on this cell (outside surface)
-          if (t_break[b] < 0.0 && !logged[b]) {
-            Real pamb = (pamb_bin[b] > 0.0 ? pamb_bin[b] : 1.0e-30);
-            Real p  = w(IPR, k, j, i);
-            Real vx = w(IVX, k, j, i), vy = w(IVY, k, j, i), vz = w(IVZ, k, j, i);
-            Real vr = (rad > 0.0) ? (dx*vx + dy*vy + dz*vz)/rad : 0.0; // outward radial speed
-            if ( (p > factor * pamb) && (vr > vmin) ) {
-              t_break[b] = time;  // record first time this angle breaks out
-              logged[b]  = 1;     // ensure we only log once per bin
-              if (Globals::my_rank == 0) {
-                FILE* f = std::fopen("shock_breakout.csv", "a");
-                if (f) {
-                  // bin center angle in degrees [0,90]
-                  Real phi_center_deg = ((static_cast<Real>(b) + 0.5) * 90.0 / static_cast<Real>(nbins));
-                  std::fprintf(f, "%g,%g,%g\n", phi_center_deg, rad, t_break[b]);
-                  std::fclose(f);
-                }
-              }
-            }
-          }
+          Real cvx, cvy, cvz;
+          native_vel_to_cart(pmb, k, j, i, x, y, z, cvx, cvy, cvz);
+          Real vr_c = (rad > 0.0) ? (dx_c*cvx + dy_c*cvy + dz_c*cvz) / rad : 0.0;
+          Real vt_c = (rad > 0.0) ? (-dy_c*cvx + dx_c*cvy) / rad : 0.0;
+
+          int idx = bi * nr + ri;
+          logS_sum[idx] += std::log10(S);
+          vr_sum  [idx] += vr_c;
+          vt_sum  [idx] += vt_c;
+          cnt     [idx] += 1.0;
         }
       }
     }
   }
+
+#ifdef MPI_PARALLEL
+  MPI_Allreduce(MPI_IN_PLACE, logS_sum.data(), ps, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, vr_sum.data(),   ps, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, vt_sum.data(),   ps, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, cnt.data(),       ps, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
+  if (Globals::my_rank == 0) {
+    FILE* f = std::fopen("shock_front.csv", "a");
+    if (f) {
+      for (int bi = 0; bi < nb_ang; ++bi) {
+        // |d(log10 S)/dr| via central differences; skip bins with no data on either side
+        std::vector<Real> abs_grad(nr, 0.0);
+        for (int ri = 1; ri < nr - 1; ++ri) {
+          int im = bi*nr + ri - 1, ip = bi*nr + ri + 1;
+          if (cnt[im] <= 0.0 || cnt[ip] <= 0.0) continue;
+          abs_grad[ri] = std::fabs(
+            (logS_sum[ip]/cnt[ip] - logS_sum[im]/cnt[im]) / (2.0*dr));
+        }
+
+        // Local maxima above height threshold with minimum bin separation (mirrors find_peaks)
+        const Real ht  = shock_peak_height_g;
+        const int  dst = shock_peak_dist_g;
+        std::vector<int> peaks;
+        for (int ri = 1; ri < nr - 1; ++ri) {
+          if (abs_grad[ri] < ht) continue;
+          if (abs_grad[ri] <= abs_grad[ri-1] || abs_grad[ri] <= abs_grad[ri+1]) continue;
+          if (!peaks.empty() && ri - peaks.back() < dst) {
+            if (abs_grad[ri] > abs_grad[peaks.back()]) peaks.back() = ri;
+          } else {
+            peaks.push_back(ri);
+          }
+        }
+
+        // r at center of bin ri
+        auto r_of = [&](int ri_) { return rmin + (ri_ + 0.5)*dr; };
+
+        // Keep peaks with r > 0.2, sort descending by r
+        std::vector<int> valid;
+        for (int pi : peaks)
+          if (r_of(pi) > 0.2) valid.push_back(pi);
+        std::sort(valid.begin(), valid.end(),
+                  [&](int a, int b_) { return r_of(a) > r_of(b_); });
+
+        // Outermost peak + any within max_dist of it (mushroom-shaped secondary fronts)
+        std::vector<int> selected;
+        if (!valid.empty()) {
+          Real r_outer = r_of(valid[0]);
+          for (int pi : valid)
+            if (r_outer - r_of(pi) <= shock_max_dist_g) selected.push_back(pi);
+        }
+
+        // Also keep stellar surface peak near R=1.0 if not already captured
+        std::vector<int> surf;
+        for (int pi : valid)
+          if (r_of(pi) > 0.85 && r_of(pi) < 1.15) surf.push_back(pi);
+        if (!surf.empty()) {
+          int best = *std::min_element(surf.begin(), surf.end(),
+            [&](int a, int b_) { return std::fabs(r_of(a)-1.0) < std::fabs(r_of(b_)-1.0); });
+          bool already = false;
+          for (int pi : selected)
+            if (std::fabs(r_of(pi) - r_of(best)) < 0.05) { already = true; break; }
+          if (!already) selected.push_back(best);
+        }
+
+        Real angle_deg = ((Real)bi + 0.5) * 360.0 / (Real)nb_ang;
+        bool has_surface = false, has_outer = false;
+        for (int pi : selected) {
+          Real rv = r_of(pi);
+          if (rv > 0.95 && rv < 1.05) has_surface = true;
+          if (rv > 1.05)              has_outer   = true;
+        }
+        int mushroom = (has_surface && has_outer) ? 1 : 0;
+        for (int pi : selected) {
+          int idx = bi*nr + pi;
+          std::fprintf(f, "%.6g,%.4g,%.6g,%.6g,%.6g,%d\n",
+            (double)time, (double)angle_deg,
+            (double)r_of(pi),
+            (double)(vr_sum[idx]/cnt[idx]),
+            (double)(vt_sum[idx]/cnt[idx]),
+            mushroom);
+        }
+      }
+      std::fclose(f);
+    }
+  }
+
+  shock_t_last = time;
 }
 
 //========================================================================================
