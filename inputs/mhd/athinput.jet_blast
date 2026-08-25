@@ -16,21 +16,21 @@ file_type  = hst
 dt         = 0.01
 
 <time>
-cfl_number = 0.25        # The Courant, Friedrichs, & Lewy (CFL) Number
+cfl_number = 0.4        # The Courant, Friedrichs, & Lewy (CFL) Number
 nlim       = -1         # cycle limit 
-tlim       = 8      # time limit
+tlim       = 6.5      # time limit
 integrator  = vl2       # time integration algorithm
 xorder      = 2         # order of spatial reconstruction
 ncycle_out  = 10         # interval for stdout summary info
 
 <mesh>
 nx1        = 2400      # Number of zones in X1-direction
-x1min      = 1e-3      # minimum value of X1
+x1min      = 0.01      # minimum value of X1
 x1max      = 1.5    # maximum value of X1
 ix1_bc     = outflow    # inner-X1 boundary flag
 ox1_bc     = outflow    # outer-X1 boundary flag
 
-nx2        = 1600      # Number of zones in X2-direction
+nx2        = 1200      # Number of zones in X2-direction
 x2min       = 0.0000000000000000e+00
 x2max       = 6.283185307179586
 ix2_bc     = periodic        # inner-X2 boundary flag
@@ -43,14 +43,9 @@ ix3_bc     = outflow    # inner-X3 boundary flag
 ox3_bc     = outflow       # outer-X3 boundary flag
 
 
-##refinement = adaptive
-##numlevel = 3
-##derefine_count = 5
-##adapt_interval = 10
-
 <meshblock>
-nx1 = 10
-nx2 = 10
+nx1 = 100
+nx2 = 75
 nx3 = 1
 
 <hydro>
@@ -72,10 +67,10 @@ poly_csv_path = /scratch/aripoll/athena/polytrope_n3.00.csv
 cs_factor = 1e-6
 phi0            = 0
 theta_0         = 0.174533
-t_stop        = 1.9
+t_stop        = 3.5
 jet_rinj      = 0.1
 jet_Gam       = 31
-jet_rho       = 0.003
+jet_rho       = 7.85e-4
 jet_p         = 1e-6
 
 
@@ -101,7 +96,7 @@ amr_e_ref = 0.0
 
 # FOR CONTINUOUS SHOCK FRONT TRACKING
 shock_dt_log      = 0.001    # log cadence (match out1 dt)
-shock_nbins       = 180      # angular bins over [0, 360 deg]
+shock_nbins       = 360      # angular bins over [0, 360 deg]
 shock_nr          = 512      # radial bins
 shock_r_min       = 1e-3     # min radius for shock tracking
 shock_r_max       = 1.5
