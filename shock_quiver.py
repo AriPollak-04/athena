@@ -8,7 +8,14 @@ eikonal relation to recover both the speed and the direction of the front:
 with grad T = (dT/dr, (1/r) dT/dphi) in polar coordinates. The front moves from
 early arrival times toward late ones, so +grad T is the propagation direction.
 
-Arrows show n, colored by log10(v_sh / v_star).
+Two figure styles:
+  'surface' - arrows rooted on the R = R_* arc, Cartesian axes, theta measured
+              counter-clockwise from +x, coloured by the four-velocity gamma*beta.
+  'wedge'   - the whole polar wedge, coloured by log10(v_sh / v_star).
+
+Physical check: with the jet along phi = 0, arrival times rise toward the
+equator, so leaving the star the front sweeps toward increasing theta and
+n_phi > 0. tangential_check() reports this.
 """
 import numpy as np
 import pandas as pd
@@ -17,7 +24,8 @@ from matplotlib import colors as mcolors
 from scipy.ndimage import gaussian_filter
 
 __all__ = ['arrival_map_from_dt_track', 'arrival_map_from_shock_front',
-           'eikonal_field', 'plot_shock_quiver']
+           'eikonal_field', 'four_velocity', 'surface_field',
+           'tangential_check', 'plot_shock_quiver', 'plot_surface_quiver']
 
 
 # ----------------------------------------------------------------------------
@@ -214,6 +222,112 @@ def plot_shock_quiver(T, r_grid, phi_rad, *, v_star=1.0, phi_range=(0, 90),
 
 
 # ----------------------------------------------------------------------------
+# 4. Surface-arrival quiver (Cartesian, theta measured CCW from +x)
+# ----------------------------------------------------------------------------
+def four_velocity(v):
+    """u = gamma*beta from a 3-speed in units of c. NaN where v >= c."""
+    v = np.asarray(v, dtype=float)
+    out = np.full(v.shape, np.nan)
+    ok = np.isfinite(v) & (v > 0) & (v < 1)
+    out[ok] = v[ok] / np.sqrt(1.0 - v[ok] ** 2)
+    return out
+
+
+def surface_field(T, r_grid, phi_rad, r_star=1.0, sigma=3.0, phi_range=(0, 90)):
+    """Front speed and direction where the shock crosses r = r_star.
+
+    Returns (phi, v_sh, n_r, n_phi) for the angles inside phi_range, sampled at
+    the radial index nearest r_star. The eikonal field is evaluated on the full
+    periodic map first so the phi derivative wraps correctly.
+    """
+    v, n_r, n_t = eikonal_field(T, r_grid, phi_rad, sigma=sigma)
+    i = int(np.argmin(np.abs(r_grid - r_star)))
+
+    phi_deg = np.rad2deg(phi_rad)
+    sel = (phi_deg >= phi_range[0]) & (phi_deg <= phi_range[1])
+    if not sel.any():
+        raise ValueError(f'no angles in phi_range={phi_range}')
+    return phi_rad[sel], v[i, sel], n_r[i, sel], n_t[i, sel]
+
+
+def tangential_check(phi, n_t, verbose=True):
+    """Physical sanity check: leaving the star the front should sweep toward
+    increasing theta, i.e. n_phi > 0. Returns the fraction of angles that do."""
+    ok = np.isfinite(n_t)
+    frac = float(np.mean(n_t[ok] > 0)) if ok.any() else np.nan
+    if verbose:
+        verdict = 'OK' if frac > 0.5 else 'FAILED - arrows sweep the wrong way'
+        print(f'+theta sweep: {frac:.1%} of surface angles have n_phi > 0'
+              f'   median n_phi {np.nanmedian(n_t):+.3f}   [{verdict}]')
+    return frac
+
+
+def plot_surface_quiver(T, r_grid, phi_rad, *, r_star=1.0, sigma=3.0,
+                        phi_range=(0, 90), color='u4', v_star=1.0,
+                        clim=None, cmap='plasma', arrow_scale=4.0,
+                        uniform_length=False, xlim=(-0.05, 1.5),
+                        ylim=(-0.05, 1.5), title=None, ax=None, check=True):
+    """Shock velocity at surface arrival, drawn on Cartesian (x, y) axes.
+
+    theta runs counter-clockwise from +x, so phi_range=(0, 90) fills the first
+    quadrant. Arrows are rooted on the r = r_star arc and point along the front
+    normal; color is the four-velocity u = gamma*beta ('u4') or
+    log10(v_sh/v_star) ('logv').
+    """
+    phi, v, n_r, n_t = surface_field(T, r_grid, phi_rad, r_star=r_star,
+                                     sigma=sigma, phi_range=phi_range)
+    if check:
+        tangential_check(phi, n_t)
+
+    if color == 'u4':
+        C = four_velocity(v)
+        clabel = r'$u^{\mu}$ 4-velocity'
+    elif color == 'logv':
+        with np.errstate(invalid='ignore', divide='ignore'):
+            C = np.log10(v / v_star)
+        clabel = r'$\log\left(v_{sh}/v_{*}\right)$'
+    else:
+        raise ValueError("color must be 'u4' or 'logv'")
+
+    # roots on the arc, direction from the polar unit vectors
+    x, y = r_star * np.cos(phi), r_star * np.sin(phi)
+    ux = n_r * np.cos(phi) - n_t * np.sin(phi)
+    uy = n_r * np.sin(phi) + n_t * np.cos(phi)
+    mag = np.ones_like(C) if uniform_length else C
+    ux, uy = ux * mag, uy * mag
+
+    ok = np.isfinite(C) & np.isfinite(ux) & np.isfinite(uy)
+    if not ok.any():
+        raise ValueError('no finite arrows at the surface; check r_star/sigma')
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(9, 7.5))
+
+    arc = np.linspace(phi_range[0], phi_range[1], 400) * np.pi / 180.0
+    ax.plot(r_star * np.cos(arc), r_star * np.sin(arc), color='grey', lw=1.4,
+            label=r'$R = R_{*}$', zorder=1)
+
+    lo, hi = clim if clim is not None else (np.nanmin(C), np.nanmax(C))
+    q = ax.quiver(x[ok], y[ok], ux[ok], uy[ok], C[ok],
+                  cmap=cmap, norm=mcolors.Normalize(lo, hi),
+                  angles='xy', scale_units='xy', scale=arrow_scale,
+                  width=0.004, zorder=2)
+
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    ax.set_aspect('equal')
+    ax.set_xlabel(r'$x\ [R_{*}]$')
+    ax.set_ylabel(r'$y\ [R_{*}]$')
+    ax.legend(loc='upper right', fontsize=9)
+    if title:
+        ax.set_title(title)
+
+    cb = plt.colorbar(q, ax=ax, fraction=0.045, pad=0.03)
+    cb.set_label(clabel, fontsize=11)
+    return ax, q
+
+
+# ----------------------------------------------------------------------------
 def _selftest():
     """Validate against make_fake.py's analytic ground truth.
 
@@ -248,6 +362,16 @@ def _selftest():
     print(f'             n_phi   median abs err {np.nanmedian(ent):.4f}'
           f'   max {np.nanmax(ent):.4f}')
 
+    # --- surface arrivals must sweep toward +theta (jet along phi=0)
+    T, r_grid, phi_rad = arrival_map_from_dt_track('fake_rel.csv')
+    phi_s, v_s, nr_s, nt_s = surface_field(T, r_grid, phi_rad, r_star=1.0)
+    frac = tangential_check(phi_s, nt_s)
+    u_s = four_velocity(v_s)
+    print(f'surface    : u = gamma*beta spans '
+          f'[{np.nanmin(u_s):.2f}, {np.nanmax(u_s):.2f}]  '
+          f'(fixture: 1.29 equator -> 3.04 pole)')
+
+    assert frac > 0.9, 'surface arrows do not sweep toward +theta'
     assert e_iso < 0.02, 'isotropic speed recovery failed'
     assert np.nanmedian(v[band]) > 0, 'speed must be positive'
     assert np.nanmedian(ev) < 0.05, 'anisotropic speed recovery failed'
@@ -275,10 +399,18 @@ def main(argv=None):
                    help='arrival-map smoothing, cells')
     p.add_argument('--arrows', type=int, nargs=2, default=[22, 22],
                    metavar=('NR', 'NPHI'))
-    p.add_argument('--clim', type=float, nargs=2, default=[-0.5, 1.5],
+    p.add_argument('--clim', type=float, nargs=2, default=None,
                    metavar=('LO', 'HI'))
-    p.add_argument('--cmap', default='turbo',
-                   help="'turbo' (default) or 'jet' to match the paper")
+    p.add_argument('--cmap', default=None, help='matplotlib colormap name')
+    p.add_argument('--style', choices=['surface', 'wedge'], default='surface',
+                   help="'surface': arrows on the R=R_* arc, Cartesian axes "
+                        "(default); 'wedge': polar field over the whole wedge")
+    p.add_argument('--color', choices=['u4', 'logv'], default='u4',
+                   help="'u4': four-velocity gamma*beta; 'logv': log10(v/v_star)")
+    p.add_argument('--r-star', type=float, default=1.0, dest='r_star')
+    p.add_argument('--arrow-scale', type=float, default=4.0, dest='arrow_scale',
+                   help='smaller = longer arrows (data units per unit magnitude)')
+    p.add_argument('--uniform-length', action='store_true', dest='uniform_length')
     p.add_argument('--scale-by-speed', action='store_true')
     p.add_argument('--title', default=None)
     p.add_argument('--dpi', type=int, default=150)
@@ -287,6 +419,8 @@ def main(argv=None):
 
     if a.selftest:
         return _selftest()
+    if a.cmap is None:
+        a.cmap = 'plasma' if a.style == 'surface' else 'turbo'
     if not a.csv:
         p.error('csv is required (or pass --selftest)')
 
@@ -300,12 +434,22 @@ def main(argv=None):
           f'({np.isfinite(T).mean():.1%} of cells shocked), '
           f'r [{r_grid.min():.3f}, {r_grid.max():.3f}]')
 
-    _, ax = plt.subplots(subplot_kw={'projection': 'polar'}, figsize=(7, 6.5))
-    plot_shock_quiver(T, r_grid, phi_rad, v_star=a.v_star, phi_range=tuple(a.phi_range),
-                      rmax=a.rmax, rticks=a.rticks, sigma=a.sigma,
-                      n_r_arrows=a.arrows[0], n_phi_arrows=a.arrows[1],
-                      vmin=a.clim[0], vmax=a.clim[1], cmap=a.cmap,
-                      scale_by_speed=a.scale_by_speed, title=a.title, ax=ax)
+    if a.style == 'surface':
+        _, ax = plt.subplots(figsize=(9, 7.5))
+        plot_surface_quiver(
+            T, r_grid, phi_rad, r_star=a.r_star, sigma=a.sigma,
+            phi_range=tuple(a.phi_range), color=a.color, v_star=a.v_star,
+            clim=a.clim, cmap=a.cmap, arrow_scale=a.arrow_scale,
+            uniform_length=a.uniform_length, title=a.title, ax=ax)
+    else:
+        _, ax = plt.subplots(subplot_kw={'projection': 'polar'}, figsize=(7, 6.5))
+        plot_shock_quiver(
+            T, r_grid, phi_rad, v_star=a.v_star, phi_range=tuple(a.phi_range),
+            rmax=a.rmax, rticks=a.rticks, sigma=a.sigma,
+            n_r_arrows=a.arrows[0], n_phi_arrows=a.arrows[1],
+            vmin=a.clim[0] if a.clim else -0.5,
+            vmax=a.clim[1] if a.clim else 1.5,
+            cmap=a.cmap, scale_by_speed=a.scale_by_speed, title=a.title, ax=ax)
     plt.tight_layout()
     plt.savefig(a.out, dpi=a.dpi, bbox_inches='tight')
     print(f'wrote {a.out}')
