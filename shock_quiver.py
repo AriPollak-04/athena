@@ -15,6 +15,7 @@ from matplotlib.colors import LogNorm
 from scipy.ndimage import gaussian_filter
 
 CSV     = '/scratch/aripoll/athena_out/outputs/dt_shock_track.csv'
+TRANGE  = None           # e.g. (2.0, 4.0) to use only part of the file; None = all
 R_STAR  = 1.0            # stellar radius, code units
 SIGMA   = 3              # smoothing of the arrival map, in cells
 PHI_LO, PHI_HI = 0, 90   # wedge to plot, degrees CCW from +x
@@ -24,7 +25,19 @@ MIN_WEIGHT = 0.15        # drop smoothed cells with less real data than this nea
 CLIM    = None           # e.g. (1.0, 30); None = autoscale (log)
 
 #%% Arrival-time map: when did the entropy jump peak in each cell?
+# Select on the time COLUMN, not on line numbers: rows are appended per output
+# step, so a line range only loosely tracks time and shifts whenever the tracker
+# is re-run. For a file too big to hold in memory, read it in chunks instead:
+#   df = pd.concat(c[c['time'].between(*TRANGE)]
+#                  for c in pd.read_csv(CSV, chunksize=2_000_000))
 df = pd.read_csv(CSV)
+if TRANGE is not None:
+    n0, t0, t1 = len(df), df['time'].min(), df['time'].max()
+    df = df[df['time'].between(*TRANGE)]
+    if df.empty:
+        raise SystemExit(f'no rows in t={TRANGE}; the file covers {t0:.2f}-{t1:.2f}')
+    print(f'time filter {TRANGE}: kept {len(df):,} of {n0:,} rows')
+
 peak = df.loc[df.groupby(['r', 'phi_deg'])['dlogS_dt'].idxmax()]
 
 r_grid  = np.sort(peak['r'].unique())
@@ -85,10 +98,14 @@ i_surf   = np.argmin(np.abs(r_grid - R_STAR))
 in_wedge = (phi_deg >= PHI_LO) & (phi_deg <= PHI_HI)
 row      = n_t[i_surf, in_wedge]
 ok_row   = np.isfinite(row)
-sweep    = np.mean(row[ok_row] > 0) if ok_row.any() else np.nan
-print(f'+theta sweep at R*: {sweep:.0%} of {ok_row.sum()} shocked angles '
-      f'({ok_row.mean():.0%} of the arc)  '
-      f'[{"OK" if sweep > 0.5 else "WRONG WAY"}]')
+if not ok_row.any():
+    print(f'+theta sweep at R*: no shocked angles at r={r_grid[i_surf]:.3f} '
+          '-- cannot check (R_STAR is outside the recorded band)')
+else:
+    sweep = np.mean(row[ok_row] > 0)
+    print(f'+theta sweep at R*: {sweep:.0%} of {ok_row.sum()} shocked angles '
+          f'({ok_row.mean():.0%} of the arc)  '
+          f'[{"OK" if sweep > 0.5 else "WRONG WAY"}]')
 
 # Where the front runs nearly tangential, 1/|grad T| is a *pattern* speed and can
 # exceed c. Those cells become NaN in u and are not drawn -- report how many.
