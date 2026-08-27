@@ -15,10 +15,14 @@ dt         = 0.001      # time increment between outputs
 file_type  = hst
 dt         = 0.01
 
+<output3>
+file_type = rst
+dt        = 0.25
+
 <time>
 cfl_number = 0.4        # The Courant, Friedrichs, & Lewy (CFL) Number
 nlim       = -1         # cycle limit 
-tlim       = 6.5      # time limit
+tlim       = 6.8      # time limit
 integrator  = vl2       # time integration algorithm
 xorder      = 2         # order of spatial reconstruction
 ncycle_out  = 10         # interval for stdout summary info
