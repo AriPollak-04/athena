@@ -107,7 +107,31 @@ static Real jet_rho    = 0.0;      // comoving rest-mass density in jet
 static Real jet_p      = 0.0;      // gas pressure in jet
 static Real gate_theta0 = M_PI;    // half-opening angle; inject within theta_0 of each pole
 static Real gate_phi0   = 0.0;     // center direction for 2D Cartesian wedge (radians)
+static Real jet_t_ramp  = 0.0;     // spin-down duration ending at t_stop (0 = off)
+static Real jet_Gam_end = 1.0;     // Lorentz factor reached at the end of the spin-down
 static bool jet_enabled = false;   // enable jet driving when inputs provided
+
+//----------------------------------------------------------------------------------------
+//! \fn static Real JetGammaOfTime(Real t)
+//! \brief Injected Lorentz factor at time t.
+//!
+//! Full strength until t_stop - t_ramp, then a raised-cosine taper down to jet_Gam_end
+//! at t_stop.  A hard cutoff (t_ramp = 0) releases the last-stamped Gamma = jet_Gam
+//! material as a free-coasting slug that overtakes the decelerating jet head; tapering
+//! Gamma instead makes every parcel slower than the one ahead of it, so the outflow
+//! stretches rather than colliding.
+//!
+//! Energy bookkeeping: one second of spin-down is worth I = <Gam^2 v>/(Gam^2 v) of a
+//! full-strength second (I = 0.38311 for 31 -> 1), so the effective drive duration is
+//! t_stop - (1 - I) * t_ramp.  See jet_energy.py, which inverts this for jet_rho.
+
+static Real JetGammaOfTime(Real t) {
+  if (jet_t_ramp <= 0.0) return jet_Gam;
+  Real t_on = jet_t_stop - jet_t_ramp;
+  if (t <= t_on) return jet_Gam;
+  Real s = std::min(std::max((t - t_on)/jet_t_ramp, (Real)0.0), (Real)1.0);
+  return jet_Gam_end + (jet_Gam - jet_Gam_end)*0.5*(1.0 + std::cos((Real)M_PI*s));
+}
 // ----------------------------------------------------------
 
 
@@ -292,15 +316,25 @@ static Real Out_wgas(MeshBlock *pmb, int iout, int k, int j, int i) {
 }
 
 // ---- History helpers (global integrals) ----
-// ∫ Γ dV (use with V_tot to form volume-avg Γ = Gamma_int / V_tot)
+// ∫ Γ dV (use with V_tot to form volume-avg Γ = Gamma_int / V_tot).
+// Γ is taken as D/rho from the conserved and primitive densities, which is exact and
+// needs no metric factors.  This previously integrated the adiabatic index by mistake,
+// which made the column a constant 4/3 * V_tot rather than a Lorentz-factor diagnostic.
 static Real Hst_GammaInt(MeshBlock *pmb, int iout) {
   Coordinates *pco = pmb->pcoord;
-  const Real gamma = pmb->peos->GetGamma();
   Real sum = 0.0;
-  for (int k = pmb->ks; k <= pmb->ke; ++k)
-    for (int j = pmb->js; j <= pmb->je; ++j)
-      for (int i = pmb->is; i <= pmb->ie; ++i)
-        sum += gamma * pco->GetCellVolume(k,j,i);
+  for (int k = pmb->ks; k <= pmb->ke; ++k) {
+    for (int j = pmb->js; j <= pmb->je; ++j) {
+      for (int i = pmb->is; i <= pmb->ie; ++i) {
+        Real gL = 1.0;
+#if defined(RELATIVISTIC_DYNAMICS) && (RELATIVISTIC_DYNAMICS != 0)
+        const Real rho = pmb->phydro->w(IDN,k,j,i);
+        if (rho > 0.0) gL = pmb->phydro->u(IDN,k,j,i) / rho;   // D / rho
+#endif
+        sum += gL * pco->GetCellVolume(k,j,i);
+      }
+    }
+  }
   return sum;
 }
 
@@ -361,6 +395,11 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   jet_p      = pin->GetOrAddReal("problem", "jet_p", 0.0);
   gate_theta0 = pin->GetOrAddReal("problem", "theta_0", M_PI);
   gate_phi0   = pin->GetOrAddReal("problem", "phi0", 0.0);
+  jet_t_ramp  = pin->GetOrAddReal("problem", "t_ramp", 0.0);
+  jet_Gam_end = pin->GetOrAddReal("problem", "jet_Gam_end", 1.0);
+  // Spin-down must fit inside the drive window and must not speed the jet back up
+  jet_t_ramp  = std::min(std::max(jet_t_ramp, (Real)0.0), jet_t_stop);
+  jet_Gam_end = std::min(std::max(jet_Gam_end, (Real)1.0), jet_Gam);
   // Enable jet only if a positive stop time and radius are provided
   jet_enabled = (jet_t_stop > 0.0) && (jet_rinj > 0.0) && (jet_Gam >= 1.0);
 
@@ -378,10 +417,12 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   if (Globals::my_rank == 0) {
     std::fprintf(stderr,
-      "[jet:init] enabled=%d t_stop=%g rinj=%g Gam=%g rho=%g p=%g theta_0=%g phi0=%g (always bipolar)\n",
+      "[jet:init] enabled=%d t_stop=%g rinj=%g Gam=%g rho=%g p=%g theta_0=%g phi0=%g "
+      "t_ramp=%g Gam_end=%g (always bipolar)\n",
       (int)jet_enabled, (double)jet_t_stop, (double)jet_rinj, (double)jet_Gam,
       (double)jet_rho, (double)jet_p,
-      (double)gate_theta0, (double)gate_phi0);
+      (double)gate_theta0, (double)gate_phi0,
+      (double)jet_t_ramp, (double)jet_Gam_end);
   }
   shock_params_inited = true;
   return;
@@ -756,6 +797,7 @@ void Mesh::UserWorkInLoop() {
 
   // ---- Jet driving: enforce jet state inside nozzle while time <= t_stop ----
   if (jet_enabled && (time <= jet_t_stop)) {
+    const Real Gam_t = JetGammaOfTime(time);   // full strength, or tapering to Gam_end
     for (int nb=0; nb<nblocal; ++nb) {
       MeshBlock* pmb = my_blocks(nb);
       AthenaArray<Real> &w = pmb->phydro->w;
@@ -791,7 +833,7 @@ void Mesh::UserWorkInLoop() {
             if (!angle_ok) continue;
 
             Real beta = 0.0;
-            if (jet_Gam > 1.0) beta = std::sqrt(std::max(0.0, 1.0 - 1.0/(jet_Gam*jet_Gam)));
+            if (Gam_t > 1.0) beta = std::sqrt(std::max(0.0, 1.0 - 1.0/(Gam_t*Gam_t)));
             Real ct = is2d ? 0.0 : ((rad > 0.0) ? ((z - z0c)/rad) : 1.0);
             ct = std::max((Real)-1.0, std::min((Real)1.0, ct));
             Real th = std::acos(ct);
