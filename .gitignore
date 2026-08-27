@@ -66,3 +66,7 @@ meshtest.dat
 
 # compiled doxygen file
 doc/doxy*
+
+# Python bytecode (jet_energy.py is imported from yt.ipynb)
+__pycache__/
+*.pyc
