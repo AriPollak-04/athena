@@ -35,6 +35,14 @@ T = (peak.pivot(index='r', columns='phi_deg', values='time')
 
 print(f'{T.shape[0]} radii x {T.shape[1]} angles, '
       f'{np.isfinite(T).mean():.1%} of cells shocked')
+print(f'  t     {df["time"].min():.2f} to {df["time"].max():.2f}')
+print(f'  r     {r_grid.min():.3f} to {r_grid.max():.3f}')
+print(f'  phi   {phi_deg.min():.1f} to {phi_deg.max():.1f} deg, '
+      f'{((phi_deg >= PHI_LO) & (phi_deg <= PHI_HI)).sum()} in the plotted wedge')
+if r_grid.max() - r_grid.min() < 0.5 * (RMAX - RMIN):
+    print('  NOTE: the recorded radii cover a narrow band -- the CSV only holds '
+          'cells that crossed the tracker threshold in the recorded window, '
+          'so the plot can only fill that band.')
 
 #%% Smooth, then differentiate
 # Normalised (NaN-aware) Gaussian: smooth data and mask with the same kernel so
@@ -46,9 +54,19 @@ with np.errstate(invalid='ignore', divide='ignore'):
     Ts = num / weight
 Ts[weight < MIN_WEIGHT] = np.nan    # too little real data nearby to trust
 
-dphi   = phi[1] - phi[0]
-dTdr   = np.gradient(Ts, r_grid, axis=0)
-dTdphi = (np.roll(Ts, -1, axis=1) - np.roll(Ts, 1, axis=1)) / (2 * dphi)
+dTdr = np.gradient(Ts, r_grid, axis=0)
+
+# phi is periodic only if the recorded angles actually span ~360 deg and are
+# evenly spaced; otherwise np.roll would difference non-adjacent angles across a
+# gap. Fall back to a non-periodic gradient that respects the real spacing.
+d = np.diff(phi)
+periodic = (phi.max() - phi.min() > np.deg2rad(350)) and (d.max() / d.min() < 1.5)
+if periodic:
+    dphi = phi[1] - phi[0]
+    dTdphi = (np.roll(Ts, -1, axis=1) - np.roll(Ts, 1, axis=1)) / (2 * dphi)
+else:
+    print('  phi grid is not uniform/complete -- using a non-periodic gradient')
+    dTdphi = np.gradient(Ts, phi, axis=1)
 
 g_r = dTdr
 g_t = dTdphi / r_grid[:, None]          # physical phi-component
