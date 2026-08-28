@@ -1,25 +1,26 @@
-#%% Shock-front propagation quiver
+#%% Shock-front propagation streamlines
 # Builds a shock arrival-time map T(r, phi) from dt_shock_track.csv, then uses
 # the eikonal relation to get the speed AND direction of the front:
 #
 #     v_sh = 1/|grad T|      n = grad T/|grad T|      grad T = (dT/dr, (1/r) dT/dphi)
 #
 # The front moves from early arrival times to late ones, so +grad T is the
-# propagation direction. Arrows show n, coloured by the four-velocity u = gamma*beta.
-import warnings
-
+# propagation direction. Streamlines trace n, coloured by the four-velocity
+# u = gamma*beta.
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from scipy.ndimage import gaussian_filter
+from scipy.interpolate import griddata
 
 CSV     = '/scratch/aripoll/athena_out/outputs/dt_shock_track.csv'
 R_STAR  = 1.0            # stellar radius, code units
 SIGMA   = 3              # smoothing of the arrival map, in cells
 PHI_LO, PHI_HI = 0, 90   # wedge to plot, degrees CCW from +x
-RMIN, RMAX = 0.15, 1.5   # radial span for the arrows
-NR, NPHI = 40, 40        # arrow density (blocks, not sample points)
+RMIN, RMAX = 0.15, 1.5   # radial span to draw
+NGRID   = 220            # Cartesian grid resolution for the interpolated field
+DENSITY = 1.6            # streamplot line density
 MIN_WEIGHT = 0.15        # drop smoothed cells with less real data than this nearby
 CLIM    = None           # e.g. (1.0, 30); None = autoscale (log)
 
@@ -80,34 +81,33 @@ print(f'u: median {np.nanmedian(u):.1f}, max {np.nanmax(u):.1f};  '
       f'{int(np.nansum(u > 10))} cells with u > 10')
 
 #%% Plot
-# Block-average onto a coarse grid. Subsampling by index would mostly land on
-# unshocked cells when coverage is patchy; averaging keeps any block with data.
-ri = np.nonzero((r_grid >= RMIN) & (r_grid <= RMAX))[0]
-pj = np.nonzero(in_wedge)[0]
-nr_b, nphi_b = min(NR, ri.size), min(NPHI, pj.size)
-ri = ri[:(ri.size // nr_b) * nr_b]
-pj = pj[:(pj.size // nphi_b) * nphi_b]
+# streamplot needs an evenly spaced Cartesian grid, so interpolate the polar
+# field -- defined only on shocked cells -- onto one, then blank every grid
+# point that falls outside the [RMIN, RMAX] x [PHI_LO, PHI_HI] wedge.
+R2, PHI2 = np.meshgrid(r_grid, phi, indexing='ij')
+xs = (R2 * np.cos(PHI2)).ravel()
+ys = (R2 * np.sin(PHI2)).ravel()
+uxs = (n_r * np.cos(PHI2) - n_t * np.sin(PHI2)).ravel()   # polar -> Cartesian
+uys = (n_r * np.sin(PHI2) + n_t * np.cos(PHI2)).ravel()
+us  = u.ravel()
 
-def blocks(a):
-    # mean over each block, ignoring NaN; blocks with no data stay NaN
-    b = a[np.ix_(ri, pj)].reshape(nr_b, ri.size // nr_b, nphi_b, pj.size // nphi_b)
-    with warnings.catch_warnings():     # all-NaN blocks are expected
-        warnings.simplefilter('ignore', RuntimeWarning)
-        return np.nanmean(b, axis=(1, 3))
+good = np.isfinite(uxs) & np.isfinite(uys)
+pts  = np.column_stack([xs[good], ys[good]])
 
-with np.errstate(invalid='ignore'):
-    R   = blocks(np.broadcast_to(r_grid[:, None], n_r.shape))
-    PHI = blocks(np.broadcast_to(phi[None, :], n_r.shape))
-    C, NRc, NTc = blocks(u), blocks(n_r), blocks(n_t)
+gx = np.linspace(0.0, RMAX, NGRID)
+gy = np.linspace(0.0, RMAX, NGRID)
+GX, GY = np.meshgrid(gx, gy)
+UX = griddata(pts, uxs[good], (GX, GY), method='linear')
+UY = griddata(pts, uys[good], (GX, GY), method='linear')
+C  = griddata(pts, us[good],  (GX, GY), method='linear')
 
-norm = np.hypot(NRc, NTc)               # averaging unit vectors shortens them
-NRc, NTc = NRc / norm, NTc / norm
+GR   = np.hypot(GX, GY)
+GPHI = np.degrees(np.arctan2(GY, GX))
+off  = (GR < RMIN) | (GR > RMAX) | (GPHI < PHI_LO) | (GPHI > PHI_HI)
+UX[off], UY[off] = np.nan, np.nan
 
-x, y = R * np.cos(PHI), R * np.sin(PHI)
-ux = NRc * np.cos(PHI) - NTc * np.sin(PHI)     # polar -> Cartesian
-uy = NRc * np.sin(PHI) + NTc * np.cos(PHI)
-ok = np.isfinite(C) & np.isfinite(ux)
-print(f'drawing {ok.sum()} of {C.size} blocks')
+ok = np.isfinite(UX) & np.isfinite(C)
+print(f'drawing streamlines over {ok.sum()} of {UX.size} grid points')
 
 fig, ax = plt.subplots(figsize=(9, 7.5))
 arc = np.linspace(PHI_LO, PHI_HI, 400) * np.pi / 180
@@ -115,9 +115,10 @@ ax.plot(R_STAR * np.cos(arc), R_STAR * np.sin(arc), color='grey', lw=1.4,
         label=r'$R = R_{*}$')
 
 lo, hi = CLIM if CLIM else (np.nanmin(C[ok]), np.nanmax(C[ok]))
-q = ax.quiver(x[ok], y[ok], ux[ok], uy[ok], C[ok], cmap='plasma',
-              norm=LogNorm(vmin=max(lo, 1e-3), vmax=hi),
-              angles='xy', scale_units='xy', scale=18, width=0.0035)
+strm = ax.streamplot(gx, gy, UX, UY, color=C, cmap='plasma',
+                     norm=LogNorm(vmin=max(lo, 1e-3), vmax=hi),
+                     density=DENSITY, linewidth=1.2, arrowsize=1.0)
+q = strm.lines
 
 ax.set_xlim(-0.05, RMAX)
 ax.set_ylim(-0.05, RMAX)
