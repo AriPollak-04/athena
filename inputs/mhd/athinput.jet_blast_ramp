@@ -74,7 +74,7 @@ theta_0         = 0.174533
 t_stop          = 3.5
 jet_rinj      = 0.1
 jet_Gam       = 31
-jet_rho         = 9.53819584e-04
+jet_rho         = 1.52079215e-03
 t_ramp          = 1.0
 jet_p         = 1e-6
 

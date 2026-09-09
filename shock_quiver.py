@@ -19,8 +19,8 @@ R_STAR  = 1.0            # stellar radius, code units
 SIGMA   = 3              # smoothing of the arrival map, in cells
 PHI_LO, PHI_HI = 0, 90   # wedge to plot, degrees CCW from +x
 RMIN, RMAX = 0.15, 1.5   # radial span to draw
-NGRID   = 220            # Cartesian grid resolution for the interpolated field
-DENSITY = 1.6            # streamplot line density
+NGRID   = 440            # Cartesian grid resolution for the interpolated field
+DENSITY = 1.9            # streamplot line density
 MIN_WEIGHT = 0.15        # drop smoothed cells with less real data than this nearby
 CLIM    = None           # e.g. (1.0, 30); None = autoscale (log)
 
