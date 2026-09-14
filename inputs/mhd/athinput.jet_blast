@@ -48,8 +48,8 @@ ox3_bc     = outflow       # outer-X3 boundary flag
 
 
 <meshblock>
-nx1 = 100
-nx2 = 75
+nx1 = 30
+nx2 = 20
 nx3 = 1
 
 <hydro>
