@@ -48,9 +48,11 @@ ox3_bc     = outflow       # outer-X3 boundary flag
 
 
 <meshblock>
-nx1 = 30
-nx2 = 20
+nx1 = 20     # 600/20 = 30 blocks in R
+nx2 = 12     # 300/12 = 25 blocks in phi
 nx3 = 1
+# nbtotal = 30*25 = 750. At 384 ranks, 366 ranks hold 2 blocks and 18 hold 1,
+# so ~98% load balance. Same block count also balances well on 192 ranks.
 
 <hydro>
 gamma           = 1.3333333333333333  # gamma = C_p/C_v
