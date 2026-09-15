@@ -102,8 +102,13 @@ amr_e_ref = 0.0
 
 # FOR CONTINUOUS SHOCK FRONT TRACKING
 shock_dt_log      = 0.001    # log cadence (match out1 dt)
-shock_nbins       = 360      # angular bins over [0, 360 deg]
-shock_nr          = 512      # radial bins
+# shock_nbins must not exceed nx2, and dr = (r_max-r_min)/shock_nr must stay above the
+# root-grid dx1.  Binning finer than the grid adds no resolution and silently drops data:
+# an empty bin yields no entropy gradient, so no peak, so no row for that angle, ever.
+# At 360 bins against nx2=300 (dphi=1.2 deg), 60 bins never held a cell and one sixth of
+# the angular coverage was missing from shock_front.csv.  300 maps 1:1 onto grid columns.
+shock_nbins       = 300      # angular bins over [0, 360 deg]; keep == nx2
+shock_nr          = 512      # radial bins; dr=0.00293 vs dx1=0.00248, every bin populated
 shock_r_min       = 1e-3     # min radius for shock tracking
 shock_r_max       = 1.5
 shock_peak_height = 100.0    # min |d log10(S)/dr| for a peak
