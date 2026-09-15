@@ -8,7 +8,7 @@ problem_id      = jb_e8_lowres  # problem ID: basename of output filenames
 <output1>
 file_type  = hdf5        # Binary data dump
 data_format = double     
-variable   = prim,cons      # variables to be output
+variable   = prim     # variables to be output
 dt         = 0.001      # time increment between outputs
 
 <output2>
@@ -48,8 +48,8 @@ ox3_bc     = outflow       # outer-X3 boundary flag
 
 
 <meshblock>
-nx1 = 20     # 600/20 = 30 blocks in R
-nx2 = 12     # 300/12 = 25 blocks in phi
+nx1 = 20     
+nx2 = 12     
 nx3 = 1
 # nbtotal = 30*25 = 750. At 384 ranks, 366 ranks hold 2 blocks and 18 hold 1,
 # so ~98% load balance. Same block count also balances well on 192 ranks.
@@ -102,8 +102,8 @@ amr_e_ref = 0.0
 
 # FOR CONTINUOUS SHOCK FRONT TRACKING
 shock_dt_log      = 0.001    # log cadence (match out1 dt)
-shock_nbins       = 360      # angular bins over [0, 360 deg]
-shock_nr          = 512      # radial bins
+shock_nbins       = 180      # angular bins over [0, 360 deg]
+shock_nr          = 300      # radial bins
 shock_r_min       = 1e-3     # min radius for shock tracking
 shock_r_max       = 1.5
 shock_peak_height = 100.0    # min |d log10(S)/dr| for a peak
