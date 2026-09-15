@@ -380,10 +380,38 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   shock_peak_height_g = pin->GetOrAddReal("problem", "shock_peak_height", 100.0);
   shock_peak_dist_g   = pin->GetOrAddInteger("problem", "shock_peak_dist", 10);
   shock_max_dist_g    = pin->GetOrAddReal("problem", "shock_max_dist", 0.3);
+  // The tracker re-bins the grid onto a (angle, radius) mesh.  Binning FINER than the
+  // grid does not buy resolution, it silently deletes data: an empty bin produces no
+  // entropy gradient, so no peak, so no CSV row for that angle at any time.  With
+  // nx2 = 300 (dphi = 1.2 deg) and shock_nbins = 360 (1.0 deg), 60 of the 360 angular
+  // bins never receive a single cell and 1/6 of the angular coverage is missing.
+  if (Globals::my_rank == 0) {
+    Real dx1_root = (mesh_size.x1max - mesh_size.x1min) / (Real)mesh_size.nx1;
+    Real dr_bin   = (shock_r_max_g - shock_r_min_g) / (Real)shock_nr_g;
+    if (dr_bin < dx1_root) {
+      std::fprintf(stderr, "[shock:WARN] shock_nr=%d gives dr=%g < root dx1=%g; "
+        "radial bins will be empty. Use shock_nr <= %d\n",
+        shock_nr_g, (double)dr_bin, (double)dx1_root,
+        (int)((shock_r_max_g - shock_r_min_g) / dx1_root));
+    }
+    bool cyl = (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0);
+    if (cyl && shock_nbins_g > mesh_size.nx2) {
+      std::fprintf(stderr, "[shock:WARN] shock_nbins=%d > nx2=%d; %d of %d angular bins "
+        "will never hold a cell and those angles get no rows. Use shock_nbins <= %d\n",
+        shock_nbins_g, mesh_size.nx2, shock_nbins_g - mesh_size.nx2, shock_nbins_g,
+        mesh_size.nx2);
+    }
+  }
+
   if (Globals::my_rank == 0) {
     FILE* fcsv = std::fopen("shock_front.csv", "w");
     if (fcsv) {
-      std::fprintf(fcsv, "time,angle_deg,r_shock,vr,v_tang,mushroom\n");
+      // ur, u_tang are the radial and tangential components of the SPATIAL FOUR-VELOCITY
+      // u^i = gamma*v^i, because that is what Athena++ SR stores in phydro->w(IVX..IVZ)
+      // (see adiabatic_hydro_sr.cpp, "prim(IVX) = gamma*v1").  They are physical
+      // (orthonormal) components, so |u| = sqrt(ur^2 + u_tang^2) with no metric factors,
+      // and the 3-speed is recovered as v = |u| / sqrt(1 + |u|^2).
+      std::fprintf(fcsv, "time,angle_deg,r_shock,ur,u_tang,mushroom\n");
       std::fclose(fcsv);
     }
   }
@@ -774,6 +802,10 @@ void Mesh::UserWorkInLoop() {
     }
   };
 
+  // Rotates the primitive velocity slots into Cartesian components.  In an SR build those
+  // slots hold the spatial four-velocity u^i = gamma*v^i; in a Newtonian build, v^i.
+  // Either way Athena++ uses PHYSICAL (orthonormal) components in curvilinear
+  // coordinates, which is why a plain rotation with no metric factors is correct here.
   auto native_vel_to_cart = [&](MeshBlock* pmb, int k, int j, int i,
                                 Real, Real, Real, Real &vx, Real &vy, Real &vz) {
     Real v1 = pmb->phydro->w(IVX,k,j,i);
@@ -860,11 +892,18 @@ void Mesh::UserWorkInLoop() {
             Real rho  = std::max(jet_rho, (Real)1e-30);
             Real pgas = std::max(jet_p,   (Real)1e-30);
             w(IDN,k,j,i) = rho; w(IPR,k,j,i) = pgas;
-            w(IVX,k,j,i) = v1; w(IVY,k,j,i) = v2c; w(IVZ,k,j,i) = v3;
 
 #if defined(RELATIVISTIC_DYNAMICS) && (RELATIVISTIC_DYNAMICS != 0)
             Real v2 = vx*vx + vy*vy + vz*vz; v2 = std::min(v2, 1.0 - 1e-12);
             Real gL = 1.0/std::sqrt(1.0 - v2);
+            // Athena++ SR stores the SPATIAL FOUR-VELOCITY u^i = gamma*v^i in the
+            // primitive slots, not the 3-velocity v^i (see adiabatic_hydro_sr.cpp,
+            // "prim(IVX) = gamma*v1", inverted there as u0 = sqrt(1 + u1^2+u2^2+u3^2)).
+            // Mesh::UserWorkInLoop runs before MakeOutputs in main.cpp, so writing a bare
+            // v1 here would be dumped verbatim into the prim output for the nozzle cells
+            // and read back as gamma = sqrt(1+v^2) ~ 1.4 instead of Gam_t.  The conserved
+            // update below is unaffected; only the dumped primitives were wrong.
+            w(IVX,k,j,i) = gL*v1; w(IVY,k,j,i) = gL*v2c; w(IVZ,k,j,i) = gL*v3;
             Real gamma_eos = pmb->peos->GetGamma();
             Real h_spec = 1.0 + (gamma_eos/(gamma_eos - 1.0)) * (pgas/rho);
             u(IDN,k,j,i) = rho*gL;
@@ -874,6 +913,8 @@ void Mesh::UserWorkInLoop() {
             Real tau  = rho*h_spec*gL*gL - pgas - rho*gL;
             u(IEN,k,j,i) = tau + rho*gL;
 #else
+            // Newtonian build: the primitive slots really do hold the 3-velocity.
+            w(IVX,k,j,i) = v1; w(IVY,k,j,i) = v2c; w(IVZ,k,j,i) = v3;
             Real v2mag = vx*vx + vy*vy + vz*vz;
             Real gm1 = pmb->peos->GetGamma() - 1.0;
             u(IDN,k,j,i) = rho;
@@ -897,7 +938,8 @@ void Mesh::UserWorkInLoop() {
   const int  ps     = nb_ang * nr;   // total profile size
 
   // Accumulation arrays: [angle_bin * nr + r_bin]
-  std::vector<Real> logS_sum(ps, 0.0), vr_sum(ps, 0.0), vt_sum(ps, 0.0), cnt(ps, 0.0);
+  // ur_sum/ut_sum accumulate FOUR-velocity components (see shock_front.csv header note).
+  std::vector<Real> logS_sum(ps, 0.0), ur_sum(ps, 0.0), ut_sum(ps, 0.0), cnt(ps, 0.0);
 
   for (int inb = 0; inb < nblocal; ++inb) {
     MeshBlock* pmb = my_blocks(inb);
@@ -926,15 +968,21 @@ void Mesh::UserWorkInLoop() {
           Real S = p / std::pow(rho, gamma);
           if (S <= 0.0 || !std::isfinite(S)) continue;
 
-          Real cvx, cvy, cvz;
-          native_vel_to_cart(pmb, k, j, i, x, y, z, cvx, cvy, cvz);
-          Real vr_c = (rad > 0.0) ? (dx_c*cvx + dy_c*cvy + dz_c*cvz) / rad : 0.0;
-          Real vt_c = (rad > 0.0) ? (-dy_c*cvx + dx_c*cvy) / rad : 0.0;
+          // cu* are Cartesian components of the spatial four-velocity u^i = gamma*v^i.
+          // Projecting onto unit vectors e_r = (dx,dy,dz)/rad and e_t = (-dy,dx,0)/rad
+          // gives physical (orthonormal) components.  NOTE: e_t is a unit vector only in
+          // 2D (dz_c forced to 0 above, so rad is cylindrical R).  In a 3D run rad is the
+          // spherical radius, |e_t| = sin(theta) != 1, and the meridional component is
+          // dropped entirely, so this projection would need rewriting.
+          Real cux, cuy, cuz;
+          native_vel_to_cart(pmb, k, j, i, x, y, z, cux, cuy, cuz);
+          Real ur_c = (rad > 0.0) ? (dx_c*cux + dy_c*cuy + dz_c*cuz) / rad : 0.0;
+          Real ut_c = (rad > 0.0) ? (-dy_c*cux + dx_c*cuy) / rad : 0.0;
 
           int idx = bi * nr + ri;
           logS_sum[idx] += std::log10(S);
-          vr_sum  [idx] += vr_c;
-          vt_sum  [idx] += vt_c;
+          ur_sum  [idx] += ur_c;
+          ut_sum  [idx] += ut_c;
           cnt     [idx] += 1.0;
         }
       }
@@ -943,8 +991,8 @@ void Mesh::UserWorkInLoop() {
 
 #ifdef MPI_PARALLEL
   MPI_Allreduce(MPI_IN_PLACE, logS_sum.data(), ps, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce(MPI_IN_PLACE, vr_sum.data(),   ps, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce(MPI_IN_PLACE, vt_sum.data(),   ps, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, ur_sum.data(),   ps, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, ut_sum.data(),   ps, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
   MPI_Allreduce(MPI_IN_PLACE, cnt.data(),       ps, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
 #endif
 
@@ -1016,11 +1064,20 @@ void Mesh::UserWorkInLoop() {
         int mushroom = (has_surface && has_outer) ? 1 : 0;
         for (int pi : selected) {
           int idx = bi*nr + pi;
+          // The gradient guard above only checks the NEIGHBOURS ri-1 and ri+1, so a peak
+          // can land in a bin that holds no cells of its own.  That is impossible while
+          // dr >= the root-grid dx1, but becomes possible as soon as shock_nr is raised
+          // past that, and 0.0/0.0 would put a NaN in the CSV.  Skip instead.
+          if (cnt[idx] <= 0.0) continue;
           std::fprintf(f, "%.6g,%.4g,%.6g,%.6g,%.6g,%d\n",
             (double)time, (double)angle_deg,
             (double)r_of(pi),
-            (double)(vr_sum[idx]/cnt[idx]),
-            (double)(vt_sum[idx]/cnt[idx]),
+            // Bin-averaged four-velocity components: the sum over every cell that landed
+            // in this (angle, radius) bin, divided by the cell count.  This is the MEAN
+            // COMPONENT, so the reported |u| is the magnitude of the mean, not the mean
+            // magnitude, and a bin straddling the shock mixes shocked and unshocked gas.
+            (double)(ur_sum[idx]/cnt[idx]),
+            (double)(ut_sum[idx]/cnt[idx]),
             mushroom);
         }
       }
@@ -1109,8 +1166,12 @@ int RefinementCondition(MeshBlock *pmb) {
     return (w(comp,k+1,j,i) - w(comp,k-1,j,i)) / (coord.x3v(k+1) - coord.x3v(k-1) + tiny);
   };
 
-  // Max physical speed (beta) in this block.
-  // NOTE: In this problem generator + jet driver, primitives store 3-velocity.
+  // Max physical speed (beta = |v|/c) in this block.
+  // NOTE: In an SR build the primitive velocity slots hold the SPATIAL FOUR-VELOCITY
+  // u^i = gamma*v^i, not v^i (adiabatic_hydro_sr.cpp: "prim(IVX) = gamma*v1").  Taking
+  // sqrt(sum u_i^2) and clipping it at 1 would saturate for every cell with |u| >= 1,
+  // i.e. v >= 0.707, making the speed indicator unable to tell gamma = 1.5 from
+  // gamma = 31.  Convert properly instead: v = |u| / sqrt(1 + |u|^2).
   Real max_beta = 0.0;
 
   // Max conserved total energy density in this block (u(IEN)).
@@ -1125,15 +1186,19 @@ int RefinementCondition(MeshBlock *pmb) {
     for (int j = pmb->js; j <= pmb->je; ++j) {
       for (int i = pmb->is; i <= pmb->ie; ++i) {
         // --- speed indicator (beta) ---
-        Real vx = w(IVX,k,j,i);
-        Real vy = has_y ? w(IVY,k,j,i) : 0.0;
-        Real vz = has_z ? w(IVZ,k,j,i) : 0.0;
-        Real v2  = vx*vx + vy*vy + vz*vz;
+        Real ux = w(IVX,k,j,i);
+        Real uy = has_y ? w(IVY,k,j,i) : 0.0;
+        Real uz = has_z ? w(IVZ,k,j,i) : 0.0;
+        Real vsq_or_usq = ux*ux + uy*uy + uz*uz;
+        Real beta;
 #if defined(RELATIVISTIC_DYNAMICS) && (RELATIVISTIC_DYNAMICS != 0)
-        // Keep subluminal
-        v2 = std::min(v2, (Real)(1.0 - 1e-12));
+        // vsq_or_usq is |u|^2 = (gamma*v)^2; beta = |u|/sqrt(1+|u|^2) is subluminal by
+        // construction, so no clipping is needed.
+        beta = std::sqrt(std::max((Real)0.0, vsq_or_usq)
+                         / (1.0 + std::max((Real)0.0, vsq_or_usq)));
+#else
+        beta = std::sqrt(std::max((Real)0.0, vsq_or_usq));
 #endif
-        Real beta = std::sqrt(std::max((Real)0.0, v2));
         if (beta > max_beta) max_beta = beta;
 
         // --- energy indicator ---

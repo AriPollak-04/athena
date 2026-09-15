@@ -55,6 +55,10 @@ plt.legend()
 
 # Load the csv file
 data = pd.read_csv('/scratch/aripoll/athena_out/outputs/shock_breakout.csv')
+# The velocity columns hold the SPATIAL FOUR-VELOCITY u^i = gamma*v^i, not a 3-velocity,
+# because that is what Athena++ SR keeps in the primitive slots.  Older CSVs spell them
+# vr/v_tang.  Recover a 3-speed with v = |u| / sqrt(1 + |u|^2).
+data = data.rename(columns={'vr': 'ur', 'v_tang': 'u_tang'})
 data.set_index('angle_deg', inplace=True)
 
 #%%
@@ -114,20 +118,22 @@ ax = plt.subplot(111, projection='polar')
 
 theta = np.deg2rad(data.index.values.astype(float))
 r = data['radius'].values
-vr = data['vr'].values
-v_tang = data['v_tang'].values
+ur = data['ur'].values
+u_tang = data['u_tang'].values
 
-# Convert (vr, v_tang) in polar basis to Cartesian for quiver
-u = vr * np.cos(theta) - v_tang * np.sin(theta)
-v = vr * np.sin(theta) + v_tang * np.cos(theta)
+# ur and u_tang are PHYSICAL (orthonormal) components, so this is a plain rotation and
+# the magnitude below is the plain Pythagorean sum, with no 1/r metric factors.  Those
+# belong to the gradient, |grad f|^2 = (df/dr)^2 + (1/r^2)(df/dphi)^2.
+ux = ur * np.cos(theta) - u_tang * np.sin(theta)
+uy = ur * np.sin(theta) + u_tang * np.cos(theta)
 
-speed = np.sqrt(vr**2 + v_tang**2)
-qv = ax.quiver(theta, r, u, v, speed, cmap='plasma',
+u_mag = np.sqrt(ur**2 + u_tang**2)          # = gamma*|v|, unbounded, not a speed
+qv = ax.quiver(theta, r, ux, uy, u_mag, cmap='plasma',
                angles='xy', scale_units='xy', scale=0.2)
-plt.colorbar(qv, label='Speed |v|')
+plt.colorbar(qv, label=r'$|u| = \gamma v$')
 ax.set_thetamin(0)
 ax.set_thetamax(90)
 ax.set_rmax(data['radius'].max() * 1.2)
-plt.title('Velocity Vectors at Shock Surface')
+plt.title('Four-Velocity Vectors at Shock Surface')
 plt.grid(True)
 # %%
