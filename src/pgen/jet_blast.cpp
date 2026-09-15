@@ -380,6 +380,29 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   shock_peak_height_g = pin->GetOrAddReal("problem", "shock_peak_height", 100.0);
   shock_peak_dist_g   = pin->GetOrAddInteger("problem", "shock_peak_dist", 10);
   shock_max_dist_g    = pin->GetOrAddReal("problem", "shock_max_dist", 0.3);
+  // The tracker re-bins the grid onto a (angle, radius) mesh.  Binning FINER than the
+  // grid does not buy resolution, it silently deletes data: an empty bin produces no
+  // entropy gradient, so no peak, so no CSV row for that angle at any time.  With
+  // nx2 = 300 (dphi = 1.2 deg) and shock_nbins = 360 (1.0 deg), 60 of the 360 angular
+  // bins never receive a single cell and 1/6 of the angular coverage is missing.
+  if (Globals::my_rank == 0) {
+    Real dx1_root = (mesh_size.x1max - mesh_size.x1min) / (Real)mesh_size.nx1;
+    Real dr_bin   = (shock_r_max_g - shock_r_min_g) / (Real)shock_nr_g;
+    if (dr_bin < dx1_root) {
+      std::fprintf(stderr, "[shock:WARN] shock_nr=%d gives dr=%g < root dx1=%g; "
+        "radial bins will be empty. Use shock_nr <= %d\n",
+        shock_nr_g, (double)dr_bin, (double)dx1_root,
+        (int)((shock_r_max_g - shock_r_min_g) / dx1_root));
+    }
+    bool cyl = (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0);
+    if (cyl && shock_nbins_g > mesh_size.nx2) {
+      std::fprintf(stderr, "[shock:WARN] shock_nbins=%d > nx2=%d; %d of %d angular bins "
+        "will never hold a cell and those angles get no rows. Use shock_nbins <= %d\n",
+        shock_nbins_g, mesh_size.nx2, shock_nbins_g - mesh_size.nx2, shock_nbins_g,
+        mesh_size.nx2);
+    }
+  }
+
   if (Globals::my_rank == 0) {
     FILE* fcsv = std::fopen("shock_front.csv", "w");
     if (fcsv) {
@@ -1041,6 +1064,11 @@ void Mesh::UserWorkInLoop() {
         int mushroom = (has_surface && has_outer) ? 1 : 0;
         for (int pi : selected) {
           int idx = bi*nr + pi;
+          // The gradient guard above only checks the NEIGHBOURS ri-1 and ri+1, so a peak
+          // can land in a bin that holds no cells of its own.  That is impossible while
+          // dr >= the root-grid dx1, but becomes possible as soon as shock_nr is raised
+          // past that, and 0.0/0.0 would put a NaN in the CSV.  Skip instead.
+          if (cnt[idx] <= 0.0) continue;
           std::fprintf(f, "%.6g,%.4g,%.6g,%.6g,%.6g,%d\n",
             (double)time, (double)angle_deg,
             (double)r_of(pi),
