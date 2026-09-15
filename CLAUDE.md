@@ -68,7 +68,23 @@ The simulation loop lives in `src/main.cpp`. Each timestep, the `TaskList` syste
 Custom fields defined in `yt.ipynb`:
 - Lorentz gamma from 4-velocity components
 - Enthalpy: `h = 1 + 4P/ρ`
-- Cartesian velocities from cylindrical decomposition
+- `u_cyl_x` / `u_cyl_y` — Cartesian four-velocity from cylindrical decomposition
+
+## SR Velocity Convention (important)
+
+In an SR build (`-s`), Athena++ stores the **spatial four-velocity** `u^i = γ v^i` in the
+primitive velocity slots `w(IVX/IVY/IVZ)`, **not** the 3-velocity. See
+`src/eos/adiabatic_hydro_sr.cpp` (`prim(IVX) = gamma*v1`, inverted as
+`u0 = sqrt(1 + u1² + u2² + u3²)`). Consequences:
+
+- `γ = sqrt(1 + |u|²)`. Never compute `γ = 1/sqrt(1 - |u|²)` from these fields.
+- `v = u / sqrt(1 + |u|²)`. `|u|` is unbounded and is not a speed; `|u| = 1` is `v = 0.707c`.
+- Components in curvilinear coordinates are **physical (orthonormal)**, so magnitudes are
+  the plain Pythagorean sum and rotations use a plain rotation matrix, with no metric
+  factors. The `1/r` factors belong to the gradient,
+  `|∇f|² = (∂f/∂r)² + (1/r²)(∂f/∂φ)²`, not to physical-component vectors.
+- The `ur` / `u_tang` columns in `shock_front.csv` are four-velocity components (older
+  files spell them `vr` / `v_tang`).
 
 ## Regression Tests
 
