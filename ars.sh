@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=192
-#SBATCH --time=12:00:00
+#SBATCH --time=6:00:00
 #SBATCH --job-name=ars
 #SBATCH --output=/scratch/aripoll/athena_out/outputs/ars.out
-#SBATCH --mail-user=ari.pollak@mail.utoronto.ca
+#SBATCH --mail-user=arispollak@gmail.com
 #SBATCH --mail-type=BEGIN,END,FAIL
 
 cd /scratch/aripoll/athena
@@ -23,5 +23,5 @@ cd /scratch/aripoll/athena_out/outputs
 
 cp /scratch/aripoll/athena/inputs/mhd/athinput.jet_blast .
 
-mpiexec -n 384 /scratch/aripoll/athena/bin/athena -i athinput.jet_blast
+mpiexec -n 150 /scratch/aripoll/athena/bin/athena -i athinput.jet_blast
 

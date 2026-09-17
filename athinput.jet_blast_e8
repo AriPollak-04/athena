@@ -3,7 +3,7 @@ problem   = Bipolar Jet Blast With Stellar Envelope
 reference = Gardiner. T.A. & Stone, J.M., JCP, 205, 509 (2005) (for MHD version of test)
 configure = --prob=jet_blast --coord=cylindrical -hdf5 -mpi --hdf5_path="$SCRATCH" -s --flux=hlle --nscalars=1
 <job>
-problem_id      = jb_ramp  # problem ID: basename of output filenames
+problem_id      = jb_e8  # problem ID: basename of output filenames
 
 <output1>
 file_type  = hdf5        # Binary data dump
@@ -74,8 +74,7 @@ theta_0         = 0.174533
 t_stop          = 3.5
 jet_rinj      = 0.1
 jet_Gam       = 31
-jet_rho         = 1.52079215e-03
-t_ramp          = 1.0
+jet_rho         = 1.25204135e-03
 jet_p         = 1e-6
 
 
