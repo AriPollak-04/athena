@@ -8,7 +8,7 @@ problem_id      = jb_e8  # problem ID: basename of output filenames
 <output1>
 file_type  = hdf5        # Binary data dump
 data_format = double     
-variable   = prim,cons      # variables to be output
+variable   = prim     # variables to be output
 dt         = 0.001      # time increment between outputs
 
 <output2>
@@ -28,13 +28,13 @@ xorder      = 2         # order of spatial reconstruction
 ncycle_out  = 10         # interval for stdout summary info
 
 <mesh>
-nx1        = 2400      # Number of zones in X1-direction
+nx1        = 600      # Number of zones in X1-direction
 x1min      = 0.01      # minimum value of X1
 x1max      = 1.5    # maximum value of X1
 ix1_bc     = outflow    # inner-X1 boundary flag
 ox1_bc     = outflow    # outer-X1 boundary flag
 
-nx2        = 1200      # Number of zones in X2-direction
+nx2        = 300      # Number of zones in X2-direction
 x2min       = 0.0000000000000000e+00
 x2max       = 6.283185307179586
 ix2_bc     = periodic        # inner-X2 boundary flag
@@ -48,9 +48,11 @@ ox3_bc     = outflow       # outer-X3 boundary flag
 
 
 <meshblock>
-nx1 = 100
-nx2 = 75
+nx1 = 20     
+nx2 = 12     
 nx3 = 1
+# nbtotal = 30*25 = 750. At 384 ranks, 366 ranks hold 2 blocks and 18 hold 1,
+# so ~98% load balance. Same block count also balances well on 192 ranks.
 
 <hydro>
 gamma           = 1.3333333333333333  # gamma = C_p/C_v
@@ -100,8 +102,8 @@ amr_e_ref = 0.0
 
 # FOR CONTINUOUS SHOCK FRONT TRACKING
 shock_dt_log      = 0.001    # log cadence (match out1 dt)
-shock_nbins       = 360      # angular bins over [0, 360 deg]
-shock_nr          = 512      # radial bins
+shock_nbins       = 180      # angular bins over [0, 360 deg]
+shock_nr          = 300      # radial bins
 shock_r_min       = 1e-3     # min radius for shock tracking
 shock_r_max       = 1.5
 shock_peak_height = 100.0    # min |d log10(S)/dr| for a peak
