@@ -71,14 +71,41 @@ def beta_of(gam):
     return math.sqrt(1.0 - 1.0 / (gam * gam))
 
 
-def jet_gamma_of_time(t, gam, t_stop, t_ramp=0.0, gam_end=1.0):
+def g_of_gamma(gam):
+    """``g(Gamma) = Gamma^2 v = Gamma sqrt(Gamma^2 - 1)``.
+
+    The injected luminosity is ``L = K g(Gamma)`` with ``K`` time-independent, so shaping
+    ``L`` in time means shaping ``g``.  Strictly increasing on ``Gamma >= 1``.
+    """
+    if gam <= 1.0:
+        return 0.0
+    return gam * math.sqrt(gam * gam - 1.0)
+
+
+def gamma_of_g(gval):
+    """Inverse of :func:`g_of_gamma`.
+
+    With ``x = Gamma^2``, ``g^2 = x^2 - x``, so ``x^2 - x - g^2 = 0`` and the positive
+    root is ``x = [1 + sqrt(1 + 4 g^2)]/2``.  ``g >= 0`` gives ``x >= 1`` so
+    ``Gamma >= 1`` always, and ``g -> 0`` gives ``Gamma -> 1``.
+    """
+    if gval <= 0.0:
+        return 1.0
+    return math.sqrt(0.5 * (1.0 + math.sqrt(1.0 + 4.0 * gval * gval)))
+
+
+def jet_gamma_of_time(t, gam, t_stop, t_ramp=0.0, gam_end=1.0, a=1.0, t0=0.0):
     """Instantaneous injected Lorentz factor.
 
-    Mirrors ``JetGammaOfTime`` in ``src/pgen/jet_blast.cpp``: full strength until
-    ``t_stop - t_ramp``, then a raised-cosine taper down to ``gam_end`` at ``t_stop``.
+    Mirrors ``JetGammaOfTime`` in ``src/pgen/jet_blast.cpp``, including its precedence:
+    ``t0 > 0`` selects the exponential engine decay ``L(t) = L_* a exp(-t/t0)`` carried by
+    ``Gamma``; otherwise ``t_ramp > 0`` selects the raised-cosine taper down to
+    ``gam_end`` over the last ``t_ramp``; otherwise the drive is a square pulse.
     """
     if t > t_stop:
         return 0.0
+    if t0 > 0.0:
+        return gamma_of_g(a * math.exp(-t / t0) * g_of_gamma(gam))
     if t_ramp <= 0.0:
         return gam
     t_on = t_stop - t_ramp
@@ -105,12 +132,38 @@ def taper_factor(gam, gam_end=1.0, nsub=20000):
     return (acc / nsub) / full
 
 
-def effective_duration(t_stop, t_ramp=0.0, gam=31.0, gam_end=1.0):
-    """Full-strength-equivalent drive duration, ``t_stop - (1 - I) * t_ramp``."""
+def effective_duration(t_stop, t_ramp=0.0, gam=31.0, gam_end=1.0, a=1.0, t0=0.0):
+    """Full-strength-equivalent drive duration: ``E = L_* * effective_duration``.
+
+    Exponential branch (``t0 > 0``) is exact and closed form, being the elementary
+    ``integral of a exp(-t/t0) from 0 to t_stop = a t0 (1 - exp(-t_stop/t0))``.  The
+    cosine branch has no closed form and falls back to the numerical
+    :func:`taper_factor`.
+    """
+    if t0 > 0.0:
+        return a * t0 * (1.0 - math.exp(-t_stop / t0))
     if t_ramp <= 0.0:
         return t_stop
     t_ramp = min(t_ramp, t_stop)
     return (t_stop - t_ramp) + t_ramp * taper_factor(gam, gam_end)
+
+
+def t_stop_for(a, t0, gam=31.0, gam_end=1.5):
+    """Time at which the exponential decay brings ``Gamma`` down to ``gam_end``.
+
+    ``Gamma(t) <= gam_end`` iff ``a exp(-t/t0) g(gam) <= g(gam_end)``, so
+    ``t_stop = t0 ln( a g(gam) / g(gam_end) )``.  Choosing ``t_stop`` this way rather than
+    by hand is what makes the truncation in :func:`effective_duration` collapse to a
+    0.18% correction, leaving ``t_jet = a t0``.
+    """
+    if gam_end <= 1.0:
+        raise ValueError("gam_end must exceed 1: Gamma reaches 1 only asymptotically.")
+    ratio = a * g_of_gamma(gam) / g_of_gamma(gam_end)
+    if ratio <= 1.0:
+        raise ValueError(
+            "Gamma(0) = %g is already at or below gam_end = %g; nothing to decay."
+            % (gamma_of_g(a * g_of_gamma(gam)), gam_end))
+    return t0 * math.log(ratio)
 
 
 def jet_luminosity(rho_j, p_j, gam, r_inj, theta_0):
@@ -184,8 +237,11 @@ def jet_energy(params, csv_path=DEFAULT_CSV, m_star=1.0):
     t_stop = float(prob["t_stop"])
     t_ramp = float(prob.get("t_ramp", 0.0))
     gam_end = float(prob.get("jet_Gam_end", 1.0))
+    a = float(prob.get("jet_a", 1.0))
+    t0 = float(prob.get("jet_t0", 0.0))
 
-    t_eff = effective_duration(t_stop, t_ramp, gam, gam_end)
+    t_eff = effective_duration(t_stop, t_ramp, gam, gam_end, a, t0)
+    profile = "exponential" if t0 > 0.0 else ("cosine" if t_ramp > 0.0 else "square")
     l3d, l2d = jet_luminosity(rho_j, p_j, gam, r_inj, theta_0)
     m2d = m2d_from_csv(csv_path)
     rho_a = rho_env(r_inj, csv_path)
@@ -195,7 +251,12 @@ def jet_energy(params, csv_path=DEFAULT_CSV, m_star=1.0):
         "h": w / rho_j,
         "beta": beta_of(gam),
         "t_eff": t_eff,
-        "taper": taper_factor(gam, gam_end) if t_ramp > 0.0 else 1.0,
+        "profile": profile,
+        "a": a,
+        "t0": t0,
+        "gamma0": jet_gamma_of_time(0.0, gam, t_stop, t_ramp, gam_end, a, t0),
+        "gamma_at_stop": jet_gamma_of_time(t_stop, gam, t_stop, t_ramp, gam_end, a, t0),
+        "taper": taper_factor(gam, gam_end) if (t_ramp > 0.0 and t0 <= 0.0) else 1.0,
         "L3d": l3d,
         "E3d": l3d * t_eff,
         "E3d_over_Mc2": l3d * t_eff / m_star,
@@ -209,14 +270,15 @@ def jet_energy(params, csv_path=DEFAULT_CSV, m_star=1.0):
 
 
 def solve_jet_rho(e_target, t_stop, t_ramp=0.0, gam=31.0, gam_end=1.0,
-                  p_j=1e-6, r_inj=0.1, theta_0=0.174533, m_star=1.0):
+                  p_j=1e-6, r_inj=0.1, theta_0=0.174533, m_star=1.0,
+                  a=1.0, t0=0.0):
     """``jet_rho`` giving ``E3d/Mc^2 == e_target``.
 
     Exact, not iterative: the energy is linear in ``rho_j`` once the effective duration
     is known.  Raises ``ValueError`` if the requested energy is unreachable at this
     ``jet_p`` (the enthalpy floor alone already overshoots it).
     """
-    t_eff = effective_duration(t_stop, t_ramp, gam, gam_end)
+    t_eff = effective_duration(t_stop, t_ramp, gam, gam_end, a, t0)
     geom = 2.0 * gam * gam * beta_of(gam) * math.pi * r_inj ** 2 \
         * math.sin(theta_0) ** 2 * t_eff
     w_needed = e_target * m_star / geom
@@ -226,6 +288,81 @@ def solve_jet_rho(e_target, t_stop, t_ramp=0.0, gam=31.0, gam_end=1.0,
             "E/Mc^2 = %g is unreachable with jet_p = %g: the pressure term alone "
             "contributes more than the target." % (e_target, p_j))
     return rho_j
+
+
+def solve_exp(gam=31.0, gam_end=1.5, rho_j=7.85e-4, p_j=1e-6, r_inj=0.1,
+              theta_0=0.174533, m_star=1.0,
+              e_target=None, t_jet=None, a=None, gamma0=None, t0=None):
+    """Close the exponential turn-off design from any **two** of its three free knobs.
+
+    The knobs are, in groups:
+
+    * energy   -- ``e_target`` (as E/Mc^2) or equivalently ``t_jet``;
+    * amplitude -- ``a`` or equivalently ``gamma0``, the peak Lorentz factor;
+    * decay    -- ``t0``.
+
+    ``t_jet`` and ``e_target`` are the same quantity in different units, since
+    ``t_jet = E / L_*`` with ``L_*`` fixed by ``rho_j``, ``gam`` and the nozzle geometry;
+    likewise ``a`` and ``gamma0`` are related exactly by ``a = g(gamma0)/g(gam)``.  Give
+    one from each of exactly two groups and the third is determined.
+
+    With ``t_stop`` set by :func:`t_stop_for` the energy integral closes exactly:
+
+    ``t_jet = t0 (a - r_end)``,  ``r_end = g(gam_end)/g(gam)``
+
+    which is the user-facing ``t_jet = a t0`` up to the 0.18% term ``t0 r_end``.
+
+    Returns a dict with ``a, t0, gamma0, t_jet, t_stop, gamma_at_stop, E3d_over_Mc2,
+    L_star`` plus ``t_eff_check`` recomputed independently via
+    :func:`effective_duration` for use as a round-trip assertion.
+    """
+    if e_target is not None and t_jet is not None:
+        raise ValueError("give e_target or t_jet, not both -- they are one quantity.")
+    if a is not None and gamma0 is not None:
+        raise ValueError("give a or gamma0, not both -- they are one quantity.")
+
+    l_star = jet_luminosity(rho_j, p_j, gam, r_inj, theta_0)[0]
+    r_end = g_of_gamma(gam_end) / g_of_gamma(gam)
+
+    if t_jet is None and e_target is not None:
+        t_jet = e_target * m_star / l_star
+    if a is None and gamma0 is not None:
+        a = g_of_gamma(gamma0) / g_of_gamma(gam)
+
+    given = sum(x is not None for x in (t_jet, a, t0))
+    if given != 2:
+        raise ValueError(
+            "need exactly two of {energy, amplitude, decay}; got %d. "
+            "Under-determined problems have a one-parameter family of solutions." % given)
+
+    if a is not None and a <= r_end:
+        raise ValueError(
+            "a = %g is at or below r_end = %g: Gamma(0) would already be under gam_end."
+            % (a, r_end))
+
+    if t_jet is None:
+        t_jet = t0 * (a - r_end)
+    elif t0 is None:
+        t0 = t_jet / (a - r_end)
+    else:
+        a = t_jet / t0 + r_end
+
+    if t0 <= 0.0:
+        raise ValueError("solved t0 = %g is not positive; check the inputs." % t0)
+
+    t_stop = t_stop_for(a, t0, gam, gam_end)
+    return {
+        "a": a,
+        "t0": t0,
+        "gamma0": gamma_of_g(a * g_of_gamma(gam)),
+        "t_jet": t_jet,
+        "t_stop": t_stop,
+        "gamma_at_stop": jet_gamma_of_time(t_stop, gam, t_stop, 0.0, gam_end, a, t0),
+        "E3d_over_Mc2": l_star * t_jet / m_star,
+        "L_star": l_star,
+        "r_end": r_end,
+        "t_eff_check": effective_duration(t_stop, 0.0, gam, gam_end, a, t0),
+    }
 
 
 def write_variant(base_path, out_path, **sections):
@@ -307,8 +444,15 @@ def report(params, label="", csv_path=DEFAULT_CSV):
     print(head)
     print("  h              = %.7f" % e["h"])
     print("  beta_jet       = %.7f" % e["beta"])
+    print("  turnoff        = %-11s t_eff = %.4f" % (e["profile"], e["t_eff"]))
+    if e["profile"] == "exponential":
+        print("                   a = %g, t_0 = %g" % (e["a"], e["t0"]))
     if e["taper"] < 1.0:
-        print("  taper factor   = %.5f  (t_eff = %.4f)" % (e["taper"], e["t_eff"]))
+        print("  taper factor   = %.5f" % e["taper"])
+    print("  Gamma(0)       = %.2f" % e["gamma0"])
+    print("  Gamma(t_stop)  = %.3f   %s"
+          % (e["gamma_at_stop"],
+             "clean stop" if e["gamma_at_stop"] < 1.5 else "<-- fast residual remains"))
     print("  L_tilde        = %.4e   (rho_env(r_inj) = %.4f)"
           % (e["L_tilde"], e["rho_env_at_rinj"]))
     print("  L_jet (3D)     = %.6e" % e["L3d"])
