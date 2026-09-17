@@ -23,5 +23,5 @@ cd /scratch/aripoll/athena_out/outputs
 
 cp /scratch/aripoll/athena/inputs/mhd/athinput.jet_blast .
 
-mpiexec -n 384 /scratch/aripoll/athena/bin/athena -i athinput.jet_blast
+mpiexec -n 150 /scratch/aripoll/athena/bin/athena -i athinput.jet_blast
 
