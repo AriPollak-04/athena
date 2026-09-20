@@ -1,3 +1,4 @@
+#%%
 """Jet energy bookkeeping and input-file generation for the ``jet_blast`` problem.
 
 The ``jet_blast`` problem generator drives a bipolar jet by stamping a nozzle region
@@ -460,3 +461,5 @@ def report(params, label="", csv_path=DEFAULT_CSV):
     print("  E2d/M2d c^2    = %.6e   (M2d = %.4f, what the 2D run carries)"
           % (e["E2d_over_M2d"], e["M2d"]))
     return e
+
+# %%
