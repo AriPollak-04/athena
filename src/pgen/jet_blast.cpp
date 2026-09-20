@@ -107,8 +107,6 @@ static Real jet_rho    = 0.0;      // comoving rest-mass density in jet
 static Real jet_p      = 0.0;      // gas pressure in jet
 static Real gate_theta0 = M_PI;    // half-opening angle; inject within theta_0 of each pole
 static Real gate_phi0   = 0.0;     // center direction for 2D Cartesian wedge (radians)
-static Real jet_t_ramp  = 0.0;     // cosine spin-down duration ending at t_stop (0 = off)
-static Real jet_Gam_end = 1.0;     // Lorentz factor reached at the end of the cosine ramp
 static Real jet_a       = 1.0;     // exp envelope amplitude; Gamma(0) = jet_Gam*sqrt(a)
 static Real jet_t0      = 0.0;     // exponential engine decay time (0 = off)
 static bool jet_enabled = false;   // enable jet driving when inputs provided
@@ -140,34 +138,22 @@ static Real JetGammaOfG(Real gval) {
 
 //----------------------------------------------------------------------------------------
 //! \fn static Real JetGammaOfTime(Real t)
-//! \brief Injected Lorentz factor at time t; selects one of three turn-off profiles.
+//! \brief Injected Lorentz factor at time t.
 //!
-//! A hard cutoff releases the last-stamped Gamma = jet_Gam material as a free-coasting
+//! jet_t0 > 0 selects an exponential engine decay, L(t) = L_peak a exp(-t/t_0), carried
+//! by Gamma; otherwise the drive is a square pulse (the original behaviour).
+//!
+//! A square pulse releases the last-stamped Gamma = jet_Gam material as a free-coasting
 //! slug into a working surface whose own Lorentz factor is only ~1.2 at the radii it
-//! occupies around shutoff.  Both tapering profiles below make Gamma(t) monotonically
-//! decreasing, so every parcel is slower than the one ahead of it and the outflow
-//! stretches instead of forming a detached shell.
-//!
-//! Precedence (echoed in the [jet:init] banner so a log is never ambiguous):
-//!   t_0 > 0     exponential engine decay, L(t) = L_* a exp(-t/t_0), carried by Gamma.
-//!               Gamma(0) = jet_Gam sqrt(a) and Gamma decays on 2*t_0, not t_0, because
-//!               Gamma ~ sqrt(g) for g >> 1.  Energy is L_* a t_0 up to the truncation
-//!               at t_stop; see jet_energy.solve_exp, which inverts this.
-//!   t_ramp > 0  raised-cosine taper from jet_Gam to jet_Gam_end over the last t_ramp.
-//!   otherwise   square pulse (original behaviour).
+//! occupies around shutoff.  The exponential makes Gamma(t) monotonically decreasing, so
+//! every parcel is slower than the one ahead of it and the outflow stretches instead of
+//! forming a detached shell.  Gamma(0) = jet_Gam sqrt(a), and Gamma decays on 2*t_0 rather
+//! than t_0 because Gamma ~ sqrt(g) for g >> 1.  See jet_energy.solve_exp.
 
 static Real JetGammaOfTime(Real t) {
-  if (jet_t0 > 0.0) {
-    Real env = jet_a*std::exp(-t/jet_t0);
-    return JetGammaOfG(env*JetGofGamma(jet_Gam));
-  }
-  if (jet_t_ramp > 0.0) {
-    Real t_on = jet_t_stop - jet_t_ramp;
-    if (t <= t_on) return jet_Gam;
-    Real s = std::min(std::max((t - t_on)/jet_t_ramp, (Real)0.0), (Real)1.0);
-    return jet_Gam_end + (jet_Gam - jet_Gam_end)*0.5*(1.0 + std::cos((Real)M_PI*s));
-  }
-  return jet_Gam;
+  if (jet_t0 <= 0.0) return jet_Gam;
+  Real env = jet_a*std::exp(-t/jet_t0);
+  return JetGammaOfG(env*JetGofGamma(jet_Gam));
 }
 // ----------------------------------------------------------
 
@@ -460,13 +446,8 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   jet_p      = pin->GetOrAddReal("problem", "jet_p", 0.0);
   gate_theta0 = pin->GetOrAddReal("problem", "theta_0", M_PI);
   gate_phi0   = pin->GetOrAddReal("problem", "phi0", 0.0);
-  jet_t_ramp  = pin->GetOrAddReal("problem", "t_ramp", 0.0);
-  jet_Gam_end = pin->GetOrAddReal("problem", "jet_Gam_end", 1.0);
   jet_a       = pin->GetOrAddReal("problem", "jet_a", 1.0);
   jet_t0      = pin->GetOrAddReal("problem", "jet_t0", 0.0);
-  // Cosine spin-down must fit inside the drive window and must not speed the jet back up
-  jet_t_ramp  = std::min(std::max(jet_t_ramp, (Real)0.0), jet_t_stop);
-  jet_Gam_end = std::min(std::max(jet_Gam_end, (Real)1.0), jet_Gam);
   // An exponential envelope must be positive to mean anything
   jet_a       = std::max(jet_a,  (Real)0.0);
   jet_t0      = std::max(jet_t0, (Real)0.0);
@@ -486,22 +467,18 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   EnrollUserHistoryOutput(8, Hst_Volume,   "V_tot");
 
   if (Globals::my_rank == 0) {
-    const char *profile = (jet_t0 > 0.0) ? "exponential"
-                        : ((jet_t_ramp > 0.0) ? "cosine" : "square");
+    const char *profile = (jet_t0 > 0.0) ? "exponential" : "square";
     const double gam_at_start = JetGammaOfTime(0.0);
     const double gam_at_stop  = JetGammaOfTime(jet_t_stop);
     const double env_a = jet_a, env_t0 = jet_t0;
     std::fprintf(stderr,
       "[jet:init] enabled=%d t_stop=%g rinj=%g Gam=%g rho=%g p=%g theta_0=%g phi0=%g "
       "(always bipolar)\n"
-      "[jet:init] turnoff=%s a=%g t_0=%g t_ramp=%g Gam_end=%g "
-      "-> Gamma(0)=%g Gamma(t_stop)=%g\n",
+      "[jet:init] turnoff=%s a=%g t_0=%g -> Gamma(0)=%g Gamma(t_stop)=%g\n",
       (int)jet_enabled, (double)jet_t_stop, (double)jet_rinj, (double)jet_Gam,
       (double)jet_rho, (double)jet_p,
       (double)gate_theta0, (double)gate_phi0,
-      profile, env_a, env_t0,
-      (double)jet_t_ramp, (double)jet_Gam_end,
-      gam_at_start, gam_at_stop);
+      profile, env_a, env_t0, gam_at_start, gam_at_stop);
   }
   shock_params_inited = true;
   return;
@@ -880,7 +857,7 @@ void Mesh::UserWorkInLoop() {
 
   // ---- Jet driving: enforce jet state inside nozzle while time <= t_stop ----
   if (jet_enabled && (time <= jet_t_stop)) {
-    const Real Gam_t = JetGammaOfTime(time);   // full strength, or tapering to Gam_end
+    const Real Gam_t = JetGammaOfTime(time);   // square pulse, or decaying exponentially
     for (int nb=0; nb<nblocal; ++nb) {
       MeshBlock* pmb = my_blocks(nb);
       AthenaArray<Real> &w = pmb->phydro->w;
