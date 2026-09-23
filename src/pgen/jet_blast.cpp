@@ -99,6 +99,8 @@ static int  shock_peak_dist_g   = 10;    // min separation between peaks in bins
 static Real shock_max_dist_g    = 0.3;   // max distance from outermost peak to keep
 static Real shock_t_last        = -1e99;
 static bool shock_params_inited = false;
+// <problem_id>.shock_front.csv, so runs sharing an output directory never share a file
+static std::string shock_csv_name = "shock_front.csv";
 // --- jet driving parameters ---
 static Real jet_t_stop = 0.0;      // stop time for driving
 static Real jet_rinj   = 0.0;      // injection radius (nozzle size)
@@ -403,6 +405,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   shock_peak_height_g = pin->GetOrAddReal("problem", "shock_peak_height", 100.0);
   shock_peak_dist_g   = pin->GetOrAddInteger("problem", "shock_peak_dist", 10);
   shock_max_dist_g    = pin->GetOrAddReal("problem", "shock_max_dist", 0.3);
+  shock_csv_name      = pin->GetString("job", "problem_id") + ".shock_front.csv";
   // The tracker re-bins the grid onto a (angle, radius) mesh.  Binning FINER than the
   // grid does not buy resolution, it silently deletes data: an empty bin produces no
   // entropy gradient, so no peak, so no CSV row for that angle at any time.  With
@@ -427,7 +430,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   }
 
   if (Globals::my_rank == 0) {
-    FILE* fcsv = std::fopen("shock_front.csv", "w");
+    FILE* fcsv = std::fopen(shock_csv_name.c_str(), "w");
     if (fcsv) {
       // ur, u_tang are the radial and tangential components of the SPATIAL FOUR-VELOCITY
       // u^i = gamma*v^i, because that is what Athena++ SR stores in phydro->w(IVX..IVZ)
@@ -966,7 +969,7 @@ void Mesh::UserWorkInLoop() {
   const int  ps     = nb_ang * nr;   // total profile size
 
   // Accumulation arrays: [angle_bin * nr + r_bin]
-  // ur_sum/ut_sum accumulate FOUR-velocity components (see shock_front.csv header note).
+  // ur_sum/ut_sum accumulate FOUR-velocity components (see the shock CSV header note).
   std::vector<Real> logS_sum(ps, 0.0), ur_sum(ps, 0.0), ut_sum(ps, 0.0), cnt(ps, 0.0);
 
   for (int inb = 0; inb < nblocal; ++inb) {
@@ -1025,7 +1028,7 @@ void Mesh::UserWorkInLoop() {
 #endif
 
   if (Globals::my_rank == 0) {
-    FILE* f = std::fopen("shock_front.csv", "a");
+    FILE* f = std::fopen(shock_csv_name.c_str(), "a");
     if (f) {
       for (int bi = 0; bi < nb_ang; ++bi) {
         // |d(log10 S)/dr| via central differences; skip bins with no data on either side
