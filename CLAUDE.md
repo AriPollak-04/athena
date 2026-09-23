@@ -83,7 +83,7 @@ primitive velocity slots `w(IVX/IVY/IVZ)`, **not** the 3-velocity. See
   the plain Pythagorean sum and rotations use a plain rotation matrix, with no metric
   factors. The `1/r` factors belong to the gradient,
   `|∇f|² = (∂f/∂r)² + (1/r²)(∂f/∂φ)²`, not to physical-component vectors.
-- The `ur` / `u_tang` columns in `shock_front.csv` are four-velocity components (older
+- The `ur` / `u_tang` columns in `<problem_id>.shock_front.csv` are four-velocity components (older
   files spell them `vr` / `v_tang`).
 
 ## Regression Tests
