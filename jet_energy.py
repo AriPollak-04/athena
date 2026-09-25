@@ -1,4 +1,4 @@
-#%%
+# %%
 """Jet energy bookkeeping and input-file generation for the ``jet_blast`` problem.
 
 The problem generator drives the jet with a luminosity
@@ -29,6 +29,7 @@ the energy it reports.
 """
 
 import math
+import re
 
 GAMMA_EOS = 4.0 / 3.0
 
@@ -102,12 +103,8 @@ def solve_exp(jet_Gam=31.0, jet_rho=7.85e-4, jet_p=1e-6, jet_rinj=0.1, theta_0=0
         "t_stop": t0 * math.log(a * g_of_gamma(jet_Gam) / g_of_gamma(Gam_end)),
         "Gamma0": gamma_of_g(a * g_of_gamma(jet_Gam)),
         "t_jet": t_jet,
-        "t_stop": t_stop,
-        "gamma_at_stop": jet_gamma_of_time(t_stop, gam, t_stop, 0.0, gam_end, a, t0),
-        "E3d_over_Mc2": l_star * t_jet / m_star,
-        "L_star": l_star,
-        "r_end": r_end,
-        "t_eff_check": effective_duration(t_stop, 0.0, gam, gam_end, a, t0),
+        "E": L_peak * t_jet,
+        "L_peak": L_peak,
     }
 
 
@@ -181,30 +178,3 @@ def _fmt(value):
             return "%.8e" % value
         return repr(value) if value == int(value) else "%.6g" % value
     return str(value)
-
-
-def report(params, label="", csv_path=DEFAULT_CSV):
-    """One-line-per-quantity summary; handy from a notebook cell."""
-    e = jet_energy(params, csv_path)
-    head = "jet energy budget" + (" [%s]" % label if label else "")
-    print(head)
-    print("  h              = %.7f" % e["h"])
-    print("  beta_jet       = %.7f" % e["beta"])
-    print("  turnoff        = %-11s t_eff = %.4f" % (e["profile"], e["t_eff"]))
-    if e["profile"] == "exponential":
-        print("                   a = %g, t_0 = %g" % (e["a"], e["t0"]))
-    if e["taper"] < 1.0:
-        print("  taper factor   = %.5f" % e["taper"])
-    print("  Gamma(0)       = %.2f" % e["gamma0"])
-    print("  Gamma(t_stop)  = %.3f   %s"
-          % (e["gamma_at_stop"],
-             "clean stop" if e["gamma_at_stop"] < 1.5 else "<-- fast residual remains"))
-    print("  L_tilde        = %.4e   (rho_env(r_inj) = %.4f)"
-          % (e["L_tilde"], e["rho_env_at_rinj"]))
-    print("  L_jet (3D)     = %.6e" % e["L3d"])
-    print("  E/Mc^2 (3D)    = %.6e   <-- the usual quoted number" % e["E3d_over_Mc2"])
-    print("  E2d/M2d c^2    = %.6e   (M2d = %.4f, what the 2D run carries)"
-          % (e["E2d_over_M2d"], e["M2d"]))
-    return e
-
-# %%
