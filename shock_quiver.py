@@ -14,7 +14,7 @@ from matplotlib.colors import LogNorm
 from scipy.ndimage import gaussian_filter
 from scipy.interpolate import griddata
 
-CSV     = '/scratch/aripoll/athena_out/outputs/dt_shock_track.csv'
+CSV     = '/scratch/aripoll/athena_out/outputs/dt_shock_track_exp.csv'
 R_STAR  = 1.0            # stellar radius, code units
 SIGMA   = 3              # smoothing of the arrival map, in cells
 PHI_LO, PHI_HI = 0, 90   # wedge to plot, degrees CCW from +x
