@@ -17,7 +17,7 @@ module load hdf5-mpi/1.14.2
 
 python configure.py  --prob=jet_blast --coord=cylindrical -hdf5 -mpi --hdf5_path="$SCRATCH" -s --flux=hlle --nscalars=1
 make clean
-make -j 108
+make -j 192
 
 cd /scratch/aripoll/athena_out/outputs 
 
