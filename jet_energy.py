@@ -18,22 +18,23 @@ So `a` sets the peak, `t_0` sets how fast it dies, and the energy follows.  Note
 t_jet = E / L_peak is a *definition*, not a separate input: fixing the energy fixes t_jet
 and vice versa.  That leaves two free knobs, which is why `solve_exp` wants exactly two.
 
-``jet_turnoff = enthalpy`` in the athinput (``turnoff="enthalpy"`` here) carries the same
-envelope by h = 1 + 4p/rho instead, at fixed rho and Gamma = jet_Gam.  L is linear in
-rho h, so h(t) = a exp(-t/t_0) h_ref gives the identical L(t) and E with no inversion.
-The catch is that h cannot drop below h_ref (p below jet_p), so the decay is exhausted at
-t_0 ln(a), where L has only fallen by 1/a = h_ref/h(0).  The thermal part is all it can
-remove; the cold Gamma = jet_Gam beam that remains is cut off as a square pulse.
+``jet_turnoff = enthalpy`` in the athinput (``turnoff="enthalpy"`` here) carries the
+decay by h = 1 + 4p/rho instead, at fixed rho and Gamma = jet_Gam.  There is no `a`:
+jet_p is the pressure at t = 0, so h_0 = 1 + 4 jet_p/jet_rho, and L is linear in rho h,
+so h(t) = h_0 exp(-t/t_0) gives L(t) = L_peak exp(-t/t_0) with no inversion.  The catch
+is that h cannot drop below 1, so the decay is exhausted at t_0 ln(h_0), where L has only
+fallen by 1/h_0.  The thermal part is all it can remove, E = L_peak t_0 (1 - 1/h_0) is
+set by jet_p alone, and the cold Gamma = jet_Gam beam left is cut off as a square pulse.
 
 Typical use, straight from an athinput's <problem> block::
 
     import jet_energy as je
     je.solve_exp(a=2.0, t0=0.4875, jet_rho=1.25204135e-03)
     je.solve_exp(E=2.0e-3, Gamma0=44.0, jet_rho=1.25204135e-03)
-    je.solve_exp(turnoff="enthalpy", a=2.94, t0=0.8, jet_rho=1.451e-03)
+    je.solve_exp(turnoff="enthalpy", t0=0.8, jet_rho=1.451e-03, jet_p=7.06675e-4)
 
-Put the `a`, `t0` and `t_stop` it returns into the athinput and the run will reproduce
-the energy it reports.
+Put the `a` (gamma mode only), `t0` and `t_stop` it returns into the athinput and the
+run will reproduce the energy it reports.
 """
 
 import math
@@ -67,15 +68,15 @@ def peak_luminosity(jet_rho, jet_p, jet_Gam, jet_rinj, theta_0):
 
 def solve_exp(jet_Gam=31.0, jet_rho=7.85e-4, jet_p=1e-6, jet_rinj=0.1, theta_0=0.174533,
               Gam_end=1.5, E=None, t_jet=None, a=None, Gamma0=None, t0=None,
-              turnoff="gamma", h0=None, h_end=None):
-    """Close the design from exactly two of {E or t_jet, a or Gamma0 or h0, t0}.
+              turnoff="gamma", h_end=None):
+    """Close the design from exactly two of {E or t_jet, a or Gamma0, t0}.
 
     `E` is E/Mc^2 for a unit stellar mass.  `Gam_end` is the Lorentz factor the jet has
     decayed to by `t_stop`; it only sets where to stop stamping, not the energy.
 
-    `turnoff="enthalpy"` matches ``jet_turnoff = enthalpy``: Gamma stays at jet_Gam, the
-    peak is given as `h0` = a h_ref instead of `Gamma0`, and `h_end` (default h_ref, the
-    floor) replaces `Gam_end`.  `Gam_end` is ignored in that mode.
+    `turnoff="enthalpy"` matches ``jet_turnoff = enthalpy``: Gamma stays at jet_Gam, a is
+    1, and h_0 comes from jet_p and jet_rho, so give just one of E (or t_jet) and t0.
+    `h_end` (default 1, the floor) replaces `Gam_end`, which is ignored in that mode.
 
     Returns a dict of a, t0, Gamma0, h0, t_jet, t_stop, E, L_peak and L_stop_frac, the
     last being L(t_stop)/L(0), the step the drive ends on.
@@ -85,21 +86,21 @@ def solve_exp(jet_Gam=31.0, jet_rho=7.85e-4, jet_p=1e-6, jet_rinj=0.1, theta_0=0
     by_h = turnoff == "enthalpy"
     if E is not None and t_jet is not None:
         raise ValueError("give E or t_jet, not both -- t_jet = E / L_peak.")
-    if sum(x is not None for x in (a, Gamma0, h0)) > 1:
-        raise ValueError("give one of a, Gamma0, h0 -- each fixes the other two.")
-    if by_h and Gamma0 is not None:
-        raise ValueError("Gamma is fixed at jet_Gam for turnoff='enthalpy'; give h0.")
-    if not by_h and (h0 is not None or h_end is not None):
-        raise ValueError("h0 and h_end only apply to turnoff='enthalpy'.")
+    if a is not None and Gamma0 is not None:
+        raise ValueError("give a or Gamma0, not both -- Gamma0 = jet_Gam sqrt(a).")
+    if by_h and (a is not None or Gamma0 is not None):
+        raise ValueError("turnoff='enthalpy' takes no a or Gamma0; h_0 is set by jet_p.")
+    if not by_h and h_end is not None:
+        raise ValueError("h_end only applies to turnoff='enthalpy'.")
 
     L_peak = peak_luminosity(jet_rho, jet_p, jet_Gam, jet_rinj, theta_0)
     h_ref = 1.0 + (GAMMA_EOS / (GAMMA_EOS - 1.0)) * jet_p / jet_rho
 
     if by_h:
-        h_end = h_ref if h_end is None else h_end
-        if h_end < h_ref:
-            raise ValueError("h_end = %g is below h_ref = %g: p would drop under jet_p."
-                             % (h_end, h_ref))
+        a = 1.0                         # h(0) = h_ref = h_0, set by jet_p
+        h_end = 1.0 if h_end is None else h_end
+        if h_end < 1.0:
+            raise ValueError("h_end = %g is below 1: p would be negative." % h_end)
         r_end = h_end / h_ref
     elif Gam_end <= 1.0:
         raise ValueError("Gam_end must exceed 1: Gamma reaches 1 only asymptotically.")
@@ -110,11 +111,11 @@ def solve_exp(jet_Gam=31.0, jet_rho=7.85e-4, jet_p=1e-6, jet_rinj=0.1, theta_0=0
         t_jet = E / L_peak
     if Gamma0 is not None:
         a = g_of_gamma(Gamma0) / g_of_gamma(jet_Gam)
-    if h0 is not None:
-        a = h0 / h_ref
 
     if sum(x is not None for x in (t_jet, a, t0)) != 2:
-        raise ValueError("need exactly two of {E or t_jet, a or Gamma0 or h0, t0}.")
+        raise ValueError("need exactly two of {E or t_jet, a or Gamma0, t0}"
+                         + (" (enthalpy fixes a, so give one of E and t0)." if by_h
+                            else "."))
     if a is not None and a <= r_end:
         raise ValueError("a = %g is below r_end = %g: the jet starts under its end state."
                          % (a, r_end))
@@ -134,7 +135,7 @@ def solve_exp(jet_Gam=31.0, jet_rho=7.85e-4, jet_p=1e-6, jet_rinj=0.1, theta_0=0
         "t0": t0,
         "t_stop": t0 * math.log(a / r_end),
         "Gamma0": jet_Gam if by_h else gamma_of_g(a * g_of_gamma(jet_Gam)),
-        "h0": a * h_ref if by_h else h_ref,
+        "h0": h_ref,
         "t_jet": t_jet,
         "E": L_peak * t_jet,
         "L_peak": L_peak,
