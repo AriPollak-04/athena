@@ -111,6 +111,8 @@ static Real gate_theta0 = M_PI;    // half-opening angle; inject within theta_0 
 static Real gate_phi0   = 0.0;     // center direction for 2D Cartesian wedge (radians)
 static Real jet_a       = 1.0;     // exp envelope amplitude; Gamma(0) = jet_Gam*sqrt(a)
 static Real jet_t0      = 0.0;     // exponential engine decay time (0 = off)
+static bool jet_turnoff_h = false; // jet_turnoff = enthalpy: h carries the decay
+static Real jet_gad     = 4.0/3.0; // adiabatic index, for h = 1 + gad/(gad-1) p/rho
 static bool jet_enabled = false;   // enable jet driving when inputs provided
 
 //----------------------------------------------------------------------------------------
@@ -139,11 +141,25 @@ static Real JetGammaOfG(Real gval) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn static Real JetEnvelope(Real t)
+//! \brief f(t) in L(t) = f(t) L_ref, L_ref being the luminosity of the
+//!        (jet_rho, jet_p, jet_Gam) beam.
+//!
+//! jet_t0 > 0 selects an exponential engine decay f = a exp(-t/t_0); otherwise the drive
+//! is a square pulse, f = 1 (the original behaviour).  When the decay is carried by the
+//! enthalpy, f is floored at 1: h cannot fall below h_ref without p falling below jet_p,
+//! so after t_0 ln(a) the drive is just the cold reference beam.
+
+static Real JetEnvelope(Real t) {
+  if (jet_t0 <= 0.0) return 1.0;
+  Real env = jet_a*std::exp(-t/jet_t0);
+  if (jet_turnoff_h) env = std::max(env, (Real)1.0);
+  return env;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn static Real JetGammaOfTime(Real t)
 //! \brief Injected Lorentz factor at time t.
-//!
-//! jet_t0 > 0 selects an exponential engine decay, L(t) = L_peak a exp(-t/t_0), carried
-//! by Gamma; otherwise the drive is a square pulse (the original behaviour).
 //!
 //! A square pulse releases the last-stamped Gamma = jet_Gam material as a free-coasting
 //! slug into a working surface whose own Lorentz factor is only ~1.2 at the radii it
@@ -151,11 +167,35 @@ static Real JetGammaOfG(Real gval) {
 //! every parcel is slower than the one ahead of it and the outflow stretches instead of
 //! forming a detached shell.  Gamma(0) = jet_Gam sqrt(a), and Gamma decays on 2*t_0 rather
 //! than t_0 because Gamma ~ sqrt(g) for g >> 1.  See jet_energy.solve_exp.
+//!
+//! With jet_turnoff = enthalpy, Gamma stays at jet_Gam and JetPressureOfTime carries f.
 
 static Real JetGammaOfTime(Real t) {
-  if (jet_t0 <= 0.0) return jet_Gam;
-  Real env = jet_a*std::exp(-t/jet_t0);
-  return JetGammaOfG(env*JetGofGamma(jet_Gam));
+  if (jet_t0 <= 0.0 || jet_turnoff_h) return jet_Gam;
+  return JetGammaOfG(JetEnvelope(t)*JetGofGamma(jet_Gam));
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn static Real JetPressureOfTime(Real t)
+//! \brief Injected gas pressure at time t.
+//!
+//! L = K rho h g(Gamma) is linear in rho h = rho + gad/(gad-1) p, so at fixed rho and
+//! Gamma, h(t) = f(t) h_ref reproduces L(t) = f(t) L_ref exactly, the same history the
+//! Gamma-carried decay gives, with no inversion.  Solving rho h(t) = f rho h_ref for p:
+//!   p(t) = f jet_p + (f - 1) rho (gad-1)/gad,
+//! which is jet_p once f reaches its floor of 1.  The asymptotic Lorentz factor h Gamma
+//! still falls monotonically, so later parcels remain slower than earlier ones.
+
+static Real JetPressureOfTime(Real t) {
+  if (jet_t0 <= 0.0 || !jet_turnoff_h) return jet_p;
+  Real f = JetEnvelope(t);
+  return f*jet_p + (f - 1.0)*jet_rho*(jet_gad - 1.0)/jet_gad;
+}
+
+//! \brief Specific enthalpy of the injected beam at time t (for diagnostics).
+static Real JetEnthalpyOfTime(Real t) {
+  Real rho = std::max(jet_rho, (Real)1e-30);
+  return 1.0 + (jet_gad/(jet_gad - 1.0))*JetPressureOfTime(t)/rho;
 }
 // ----------------------------------------------------------
 
@@ -454,6 +494,26 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   // An exponential envelope must be positive to mean anything
   jet_a       = std::max(jet_a,  (Real)0.0);
   jet_t0      = std::max(jet_t0, (Real)0.0);
+  jet_gad     = pin->GetOrAddReal("hydro", "gamma", 4.0/3.0);
+  // What carries the exponential decay, gamma (default) or enthalpy.  Inert if t0 = 0.
+  std::string turnoff = pin->GetOrAddString("problem", "jet_turnoff", "gamma");
+  if (turnoff == "enthalpy") {
+    jet_turnoff_h = true;
+  } else if (turnoff != "gamma") {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in jet_blast.cpp InitUserMeshData" << std::endl
+        << "jet_turnoff = " << turnoff << " is not one of gamma, enthalpy" << std::endl;
+    ATHENA_ERROR(msg);
+  }
+  // h is floored at h_ref, so a <= 1 would never lift the beam off its floor: a square
+  // pulse run under a misleading name.  Refuse it rather than burn the allocation.
+  if (jet_turnoff_h && jet_t0 > 0.0 && jet_a <= 1.0) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in jet_blast.cpp InitUserMeshData" << std::endl
+        << "jet_turnoff = enthalpy needs jet_a > 1 (got " << jet_a << "); h(0) = a h_ref"
+        << " and h cannot fall below h_ref" << std::endl;
+    ATHENA_ERROR(msg);
+  }
   // Enable jet only if a positive stop time and radius are provided
   jet_enabled = (jet_t_stop > 0.0) && (jet_rinj > 0.0) && (jet_Gam >= 1.0);
 
@@ -470,18 +530,35 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   EnrollUserHistoryOutput(8, Hst_Volume,   "V_tot");
 
   if (Globals::my_rank == 0) {
-    const char *profile = (jet_t0 > 0.0) ? "exponential" : "square";
+    const char *profile = (jet_t0 <= 0.0) ? "square"
+                        : (jet_turnoff_h ? "exponential-enthalpy" : "exponential-gamma");
     const double gam_at_start = JetGammaOfTime(0.0);
     const double gam_at_stop  = JetGammaOfTime(jet_t_stop);
+    const double h_at_start   = JetEnthalpyOfTime(0.0);
+    const double h_at_stop    = JetEnthalpyOfTime(jet_t_stop);
+    // Size of the step the drive ends on; this is what is left to coast ballistically
+    const double l_stop_frac  = JetEnvelope(jet_t_stop)/JetEnvelope(0.0);
     const double env_a = jet_a, env_t0 = jet_t0;
     std::fprintf(stderr,
       "[jet:init] enabled=%d t_stop=%g rinj=%g Gam=%g rho=%g p=%g theta_0=%g phi0=%g "
       "(always bipolar)\n"
-      "[jet:init] turnoff=%s a=%g t_0=%g -> Gamma(0)=%g Gamma(t_stop)=%g\n",
+      "[jet:init] turnoff=%s a=%g t_0=%g -> Gamma(0)=%g Gamma(t_stop)=%g "
+      "h(0)=%g h(t_stop)=%g L(t_stop)/L(0)=%g\n",
       (int)jet_enabled, (double)jet_t_stop, (double)jet_rinj, (double)jet_Gam,
       (double)jet_rho, (double)jet_p,
       (double)gate_theta0, (double)gate_phi0,
-      profile, env_a, env_t0, gam_at_start, gam_at_stop);
+      profile, env_a, env_t0, gam_at_start, gam_at_stop,
+      h_at_start, h_at_stop, l_stop_frac);
+    if (jet_turnoff_h && jet_t0 > 0.0) {
+      const double t_cold = jet_t0*std::log(jet_a);
+      if (jet_t_stop > t_cold) {
+        std::fprintf(stderr,
+          "[jet:init] WARNING: h reaches its floor h_ref at t_0 ln(a) = %g < t_stop = %g."
+          " From then on the drive is the cold Gamma = %g beam at constant L, and it ends"
+          " as a square pulse.  Set t_stop <= %g for a pure exponential.\n",
+          t_cold, jet_t_stop, jet_Gam, t_cold);
+      }
+    }
   }
   shock_params_inited = true;
   return;
@@ -861,6 +938,7 @@ void Mesh::UserWorkInLoop() {
   // ---- Jet driving: enforce jet state inside nozzle while time <= t_stop ----
   if (jet_enabled && (time <= jet_t_stop)) {
     const Real Gam_t = JetGammaOfTime(time);   // square pulse, or decaying exponentially
+    const Real p_t   = JetPressureOfTime(time); // jet_p, unless h carries the decay
     for (int nb=0; nb<nblocal; ++nb) {
       MeshBlock* pmb = my_blocks(nb);
       AthenaArray<Real> &w = pmb->phydro->w;
@@ -921,7 +999,7 @@ void Mesh::UserWorkInLoop() {
             }
 
             Real rho  = std::max(jet_rho, (Real)1e-30);
-            Real pgas = std::max(jet_p,   (Real)1e-30);
+            Real pgas = std::max(p_t,     (Real)1e-30);
             w(IDN,k,j,i) = rho; w(IPR,k,j,i) = pgas;
 
 #if defined(RELATIVISTIC_DYNAMICS) && (RELATIVISTIC_DYNAMICS != 0)
