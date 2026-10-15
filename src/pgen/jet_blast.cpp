@@ -109,7 +109,7 @@ static Real jet_rho    = 0.0;      // comoving rest-mass density in jet
 static Real jet_p      = 0.0;      // gas pressure in jet
 static Real gate_theta0 = M_PI;    // half-opening angle; inject within theta_0 of each pole
 static Real gate_phi0   = 0.0;     // center direction for 2D Cartesian wedge (radians)
-static Real jet_a       = 1.0;     // exp envelope amplitude; Gamma(0) = jet_Gam*sqrt(a)
+static Real jet_a       = 1.0;     // gamma-mode amplitude; Gamma(0) = jet_Gam*sqrt(a)
 static Real jet_t0      = 0.0;     // exponential engine decay time (0 = off)
 static bool jet_turnoff_h = false; // jet_turnoff = enthalpy: h carries the decay
 static Real jet_gad     = 4.0/3.0; // adiabatic index, for h = 1 + gad/(gad-1) p/rho
@@ -140,6 +140,11 @@ static Real JetGammaOfG(Real gval) {
   return std::sqrt(0.5*(1.0 + std::sqrt(1.0 + 4.0*gval*gval)));
 }
 
+//! \brief Specific enthalpy h = 1 + gad/(gad-1) p/rho of the jet_rho beam at pressure p.
+static Real JetEnthalpy(Real p) {
+  return 1.0 + (jet_gad/(jet_gad - 1.0))*p/std::max(jet_rho, (Real)1e-30);
+}
+
 //----------------------------------------------------------------------------------------
 //! \fn static Real JetEnvelope(Real t)
 //! \brief f(t) in L(t) = f(t) L_ref, L_ref being the luminosity of the
@@ -147,14 +152,14 @@ static Real JetGammaOfG(Real gval) {
 //!
 //! jet_t0 > 0 selects an exponential engine decay f = a exp(-t/t_0); otherwise the drive
 //! is a square pulse, f = 1 (the original behaviour).  When the decay is carried by the
-//! enthalpy, f is floored at 1: h cannot fall below h_ref without p falling below jet_p,
-//! so after t_0 ln(a) the drive is just the cold reference beam.
+//! enthalpy, f = h(t)/h_0 = exp(-t/t_0) with h_0 = JetEnthalpy(jet_p) and jet_a unused.
+//! h cannot fall below 1 (p below 0), so f is floored at 1/h_0, which it reaches at
+//! t_0 ln(h_0); after that the drive is just the cold beam.
 
 static Real JetEnvelope(Real t) {
   if (jet_t0 <= 0.0) return 1.0;
-  Real env = jet_a*std::exp(-t/jet_t0);
-  if (jet_turnoff_h) env = std::max(env, (Real)1.0);
-  return env;
+  if (jet_turnoff_h) return std::max(std::exp(-t/jet_t0), 1.0/JetEnthalpy(jet_p));
+  return jet_a*std::exp(-t/jet_t0);
 }
 
 //----------------------------------------------------------------------------------------
@@ -180,22 +185,16 @@ static Real JetGammaOfTime(Real t) {
 //! \brief Injected gas pressure at time t.
 //!
 //! L = K rho h g(Gamma) is linear in rho h = rho + gad/(gad-1) p, so at fixed rho and
-//! Gamma, h(t) = f(t) h_ref reproduces L(t) = f(t) L_ref exactly, the same history the
-//! Gamma-carried decay gives, with no inversion.  Solving rho h(t) = f rho h_ref for p:
+//! Gamma, h(t) = h_0 exp(-t/t_0) gives L(t) = L_0 exp(-t/t_0) exactly, with no inversion.
+//! jet_p is the pressure at t = 0.  Solving rho h(t) = f rho h_0 for p:
 //!   p(t) = f jet_p + (f - 1) rho (gad-1)/gad,
-//! which is jet_p once f reaches its floor of 1.  The asymptotic Lorentz factor h Gamma
+//! which is 0 once f reaches its floor of 1/h_0.  The asymptotic Lorentz factor h Gamma
 //! still falls monotonically, so later parcels remain slower than earlier ones.
 
 static Real JetPressureOfTime(Real t) {
   if (jet_t0 <= 0.0 || !jet_turnoff_h) return jet_p;
   Real f = JetEnvelope(t);
   return f*jet_p + (f - 1.0)*jet_rho*(jet_gad - 1.0)/jet_gad;
-}
-
-//! \brief Specific enthalpy of the injected beam at time t (for diagnostics).
-static Real JetEnthalpyOfTime(Real t) {
-  Real rho = std::max(jet_rho, (Real)1e-30);
-  return 1.0 + (jet_gad/(jet_gad - 1.0))*JetPressureOfTime(t)/rho;
 }
 // ----------------------------------------------------------
 
@@ -505,15 +504,6 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
         << "jet_turnoff = " << turnoff << " is not one of gamma, enthalpy" << std::endl;
     ATHENA_ERROR(msg);
   }
-  // h is floored at h_ref, so a <= 1 would never lift the beam off its floor: a square
-  // pulse run under a misleading name.  Refuse it rather than burn the allocation.
-  if (jet_turnoff_h && jet_t0 > 0.0 && jet_a <= 1.0) {
-    std::stringstream msg;
-    msg << "### FATAL ERROR in jet_blast.cpp InitUserMeshData" << std::endl
-        << "jet_turnoff = enthalpy needs jet_a > 1 (got " << jet_a << "); h(0) = a h_ref"
-        << " and h cannot fall below h_ref" << std::endl;
-    ATHENA_ERROR(msg);
-  }
   // Enable jet only if a positive stop time and radius are provided
   jet_enabled = (jet_t_stop > 0.0) && (jet_rinj > 0.0) && (jet_Gam >= 1.0);
 
@@ -534,8 +524,8 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
                         : (jet_turnoff_h ? "exponential-enthalpy" : "exponential-gamma");
     const double gam_at_start = JetGammaOfTime(0.0);
     const double gam_at_stop  = JetGammaOfTime(jet_t_stop);
-    const double h_at_start   = JetEnthalpyOfTime(0.0);
-    const double h_at_stop    = JetEnthalpyOfTime(jet_t_stop);
+    const double h_at_start   = JetEnthalpy(JetPressureOfTime(0.0));
+    const double h_at_stop    = JetEnthalpy(JetPressureOfTime(jet_t_stop));
     // Size of the step the drive ends on; this is what is left to coast ballistically
     const double l_stop_frac  = JetEnvelope(jet_t_stop)/JetEnvelope(0.0);
     const double env_a = jet_a, env_t0 = jet_t0;
@@ -550,12 +540,13 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
       profile, env_a, env_t0, gam_at_start, gam_at_stop,
       h_at_start, h_at_stop, l_stop_frac);
     if (jet_turnoff_h && jet_t0 > 0.0) {
-      const double t_cold = jet_t0*std::log(jet_a);
+      const double t_cold = jet_t0*std::log(JetEnthalpy(jet_p));
       if (jet_t_stop > t_cold) {
         std::fprintf(stderr,
-          "[jet:init] WARNING: h reaches its floor h_ref at t_0 ln(a) = %g < t_stop = %g."
-          " From then on the drive is the cold Gamma = %g beam at constant L, and it ends"
-          " as a square pulse.  Set t_stop <= %g for a pure exponential.\n",
+          "[jet:init] WARNING: h reaches its floor of 1 at t_0 ln(h_0) = %g"
+          " < t_stop = %g."
+          " From then on the drive is the cold (p = 0) Gamma = %g beam at constant L, and"
+          " it ends as a square pulse.  Set t_stop <= %g for a pure exponential.\n",
           t_cold, jet_t_stop, jet_Gam, t_cold);
       }
     }
