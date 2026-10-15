@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --nodes=1
+#SBATCH --nodes=2
 #SBATCH --ntasks-per-node=192
 #SBATCH --time=6:00:00
 #SBATCH --job-name=ars_exp_h
@@ -23,5 +23,5 @@ cd /scratch/aripoll/athena_out/outputs
 
 cp /scratch/aripoll/athena/inputs/mhd/athinput.jet_blast_exp_h .
 
-mpiexec -n 54 /scratch/aripoll/athena/bin/athena -i athinput.jet_blast_exp_h
+mpiexec -n 384 /scratch/aripoll/athena/bin/athena -i athinput.jet_blast_exp_h
 
