@@ -72,7 +72,7 @@ poly_csv_path = /scratch/aripoll/athena/polytrope_n3.00.csv
 cs_factor = 1e-6
 phi0            = 0
 theta_0         = 0.174533
-t_stop          = 0.8649   # = jet_t0 ln(h_0), where h hits its floor of 1
+t_stop          = 1.201   # = jet_t0 ln(h_0), where h hits its floor of 1
 jet_turnoff     = enthalpy # gamma (default) or enthalpy; h(t) = h_0 exp(-t/t0)
 jet_t0          = 0.8
 jet_rinj      = 0.1
