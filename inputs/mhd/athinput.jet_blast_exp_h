@@ -3,7 +3,7 @@ problem   = Bipolar Jet Blast With Stellar Envelope
 reference = Gardiner. T.A. & Stone, J.M., JCP, 205, 509 (2005) (for MHD version of test)
 configure = --prob=jet_blast --coord=cylindrical -hdf5 -mpi --hdf5_path="$SCRATCH" -s --flux=hlle --nscalars=1
 <job>
-problem_id      = jb_exph_lowres900  # problem ID: basename of output filenames
+problem_id      = jb_exph  # problem ID: basename of output filenames
 
 <output1>
 file_type  = hdf5        # Binary data dump
@@ -72,12 +72,12 @@ poly_csv_path = /scratch/aripoll/athena/polytrope_n3.00.csv
 cs_factor = 1e-6
 phi0            = 0
 theta_0         = 0.174533
-t_stop          = 1.201   # = jet_t0 ln(h_0), where h hits its floor of 1
+t_stop          = 1.2   # = jet_t0 ln(h_0), where h hits its floor of 1
 jet_turnoff     = enthalpy # gamma (default) or enthalpy; h(t) = h_0 exp(-t/t0)
-jet_t0          = 0.8
+jet_t0          = 1.2
 jet_rinj      = 0.1
 jet_Gam       = 31
-jet_rho         = 1.451e-03
+jet_rho         = 8e-04
 jet_p         = 7.06675e-4 # at t = 0; h_0 = 1 + 4p/rho = 2.948, same L(t) as jb_exp
 
 
