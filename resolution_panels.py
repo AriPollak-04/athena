@@ -18,6 +18,7 @@ FIELD = ("gas", "pressure")
 FONT = "STIXGeneral"  # Times-like, matches AAS/MNRAS body text
 FS = 7                # pt at printed size
 AX = 1.18             # panel side in inches, five columns fit a 7.1 in two-column page
+DPI = 600             # image pixels per printed inch, the PDF default of 100 looks blocky
 # Margins in inches. EDGE is the inner margin, so joined columns sit 2*EDGE apart.
 TOP, BOT, GAP, EDGE = 0.2, 0.36, 0.04, 0.03
 LEFT = 0.42                               # y ticks and label, first column only
@@ -52,6 +53,7 @@ def plot_column(files, out, zlim, first=False, last=False):
     dss = [yt.load(f) for f in files]
     for i, (ds, ax) in enumerate(zip(dss, axes)):
         p = yt.SlicePlot(ds, "z", FIELD)
+        p.set_buff_size(round(AX * DPI))  # one image pixel per printed pixel
         # yt's own default math font is Computer Modern, override it to match the text
         p.set_font({"family": FONT, "math_fontfamily": "stix", "size": FS})
         p.set_cmap(FIELD, "inferno")
@@ -91,5 +93,6 @@ def plot_column(files, out, zlim, first=False, last=False):
             ax.set_ylabel("")
             ax.tick_params(labelleft=False)
 
-    fig.savefig(out)  # no bbox_inches="tight", it would give columns different sizes
+    # no bbox_inches="tight", it would give columns different sizes
+    fig.savefig(out, dpi=DPI)
     plt.close(fig)
