@@ -18,6 +18,7 @@ FIELD = ("gas", "pressure")
 FONT = "STIXGeneral"  # Times-like, matches AAS/MNRAS body text
 FS = 7                # pt at printed size
 AX = 1.18             # panel side in inches, five columns fit a 7.1 in two-column page
+DPI = 600             # image pixels per printed inch, the PDF default of 100 looks blocky
 # Margins in inches. EDGE is the inner margin, so joined columns sit 2*EDGE apart.
 DPI = 600
 TOP, BOT, GAP, EDGE = 0.2, 0.36, 0.04, 0.03
@@ -93,5 +94,6 @@ def plot_column(files, out, zlim, first=False, last=False):
             ax.set_ylabel("")
             ax.tick_params(labelleft=False)
 
-    fig.savefig(out)  # no bbox_inches="tight", it would give columns different sizes
+    # no bbox_inches="tight", it would give columns different sizes
+    fig.savefig(out, dpi=DPI)
     plt.close(fig)
