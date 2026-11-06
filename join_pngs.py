@@ -1,4 +1,5 @@
 """Join PNGs side by side, left to right in the order given.
+In Python, join(out, paths, ncols=2) wraps them into rows of 2 (a 2x2 grid for 4).
 
     python join_pngs.py -o joined.png a.png b.png c.png d.png
 
@@ -14,18 +15,23 @@ import sys
 from PIL import Image
 
 
-def join(out, paths):
+def join(out, paths, ncols=None):
     if os.path.abspath(out) in map(os.path.abspath, paths):
         raise ValueError(f"{out} is also an input, it would be overwritten")
     images = [Image.open(p).convert("RGBA") for p in paths]
     heights = {im.height for im in images}
     if len(heights) != 1:
         raise ValueError(f"image heights differ {heights}, rows would not line up")
-    canvas = Image.new("RGBA", (sum(im.width for im in images), heights.pop()))
-    x = 0
-    for im in images:
-        canvas.paste(im, (x, 0))
-        x += im.width
+    h = heights.pop()
+    ncols = ncols or len(images)
+    rows = [images[i:i + ncols] for i in range(0, len(images), ncols)]
+    width = max(sum(im.width for im in r) for r in rows)
+    canvas = Image.new("RGBA", (width, h * len(rows)))
+    for j, row in enumerate(rows):
+        x = 0
+        for im in row:
+            canvas.paste(im, (x, j * h))
+            x += im.width
     canvas.save(out)
 
 
